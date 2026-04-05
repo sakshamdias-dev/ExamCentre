@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { supabase, Profile, Test, isSupabaseConfigured } from './lib/supabase';
 import { initGoogleApi, uploadToDrive, isAuthorized, authorize, checkAuth, extractDriveId, fetchDriveFileAsBlob } from './lib/googleDrive';
 import { cn, formatTime } from './lib/utils';
-import emlogo from './assets/Artboard 1.png'
+import emlogo from './assets/Artboard 1.png' ; 
 import { 
   Shield, 
   User, 

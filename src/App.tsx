@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { supabase, Profile, Test, isSupabaseConfigured } from './lib/supabase';
 import { initGoogleApi, uploadToDrive, isAuthorized, authorize, checkAuth, extractDriveId, fetchDriveFileAsBlob } from './lib/googleDrive';
 import { cn, formatTime } from './lib/utils';
-import emlogo from './assets/Artboard 1.png' ; 
 import { 
   Shield, 
   User, 
@@ -304,7 +303,7 @@ const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-primary/10 rounded-full mb-4">
             <Shield className="w-8 h-8 text-primary" />
           </div>
-          <img src={emlogo}>
+          <h1 className="text-3xl font-bold text-gray-900">Examfriendly</h1>
           <p className="text-gray-500 mt-2">Secure Proctoring Platform</p>
         </div>
 

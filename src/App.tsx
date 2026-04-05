@@ -303,7 +303,7 @@ const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-primary/10 rounded-full mb-4">
             <Shield className="w-8 h-8 text-primary" />
           </div>
-          <h1 className="text-3xl font-bold text-gray-900"><img src="Artboard 1.png"></h1>
+          <img src="Artboard 1.png">
           <p className="text-gray-500 mt-2">Secure Proctoring Platform</p>
         </div>
 

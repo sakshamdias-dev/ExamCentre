@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #00BFFF; /* DeepSkyBlue */
+  --color-secondary: #FFA500; /* Orange */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  body {
+    @apply bg-white text-gray-900;
+  }
+}
+
+.proctor-gate-active {
+  @apply border-4 border-primary animate-pulse;
+}
+
+.timer-warning {
+  @apply text-secondary font-bold;
+}
+
+.timer-critical {
+  @apply text-red-600 font-black animate-bounce;
+}
+
+.canvas-overlay {
+  @apply absolute top-0 left-0 w-full h-full pointer-events-auto;
+}

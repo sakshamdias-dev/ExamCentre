@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/exam",
+      "destination": "https://examfriendly-exam.vercel.app"
+    },
+    {
+      "source": "/exam/:path*",
+      "destination": "https://examfriendly-exam.vercel.app/:path*"
+    }
+  ]
+}

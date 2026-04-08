@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase, Profile, Test, isSupabaseConfigured } from './lib/supabase';
-import { uploadToDrive, extractDriveId, fetchDriveFileAsBlob } from './lib/googleDrive';
+import { initGoogleApi, uploadToDrive, isAuthorized, authorize, checkAuth, extractDriveId, fetchDriveFileAsBlob } from './lib/googleDrive';
 import { cn, formatTime } from './lib/utils';
 import { 
   Shield, 
@@ -65,185 +65,42 @@ import { SubmissionModal } from './components/SubmissionModal';
 const getEmbedUrl = (url: string | undefined) => {
   if (!url) return '';
   
-  // Upgrade HTTP to HTTPS to avoid mixed content blocking
-  if (url.startsWith('http://')) {
-    url = url.replace('http://', 'https://');
+  // Google Drive File Link
+  const driveMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (driveMatch) {
+    return `https://drive.google.com/file/d/${driveMatch[1]}/preview`;
+  }
+  
+  // Google Docs/Sheets/Slides Link
+  const docsMatch = url.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9_-]+)/);
+  if (docsMatch) {
+    return `https://docs.google.com/${docsMatch[1]}/d/${docsMatch[2]}/preview`;
   }
 
-  // Handle local fallback or already proxied URLs
-  if (url.startsWith('local_')) {
-    url = `/api/drive/file/${url}.pdf?type=pdf`;
-  } else if (url.startsWith('/api/drive/file/')) {
-    const baseUrl = url.split('?')[0];
-    const params = url.split('?')[1] || '';
-    const finalUrl = baseUrl.endsWith('.pdf') ? baseUrl : `${baseUrl}.pdf`;
-    url = params ? `${finalUrl}?${params}&type=pdf` : `${finalUrl}?type=pdf`;
-  } else {
-    // Google Drive File Link
-    const driveMatch = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
-    if (driveMatch) {
-      url = `/api/drive/file/${driveMatch[1]}.pdf?type=pdf`;
-    } else {
-      // Google Docs/Sheets/Slides Link
-      const docsMatch = url.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9_-]+)/);
-      if (docsMatch) {
-        return `https://docs.google.com/${docsMatch[1]}/d/${docsMatch[2]}/preview`;
-      }
+  // Raw Google Drive ID (alphanumeric, underscores, hyphens, typically 25-45 chars)
+  if (url.match(/^[a-zA-Z0-9_-]{25,45}$/)) {
+    return `https://drive.google.com/file/d/${url}/preview`;
+  }
 
-      // Raw Google Drive ID (alphanumeric, underscores, hyphens, typically 25-45 chars)
-      if (url.match(/^[a-zA-Z0-9_-]{25,45}$/)) {
-        url = `/api/drive/file/${url}.pdf?type=pdf`;
-      }
-    }
+  // Use Google Docs Viewer for direct PDF links to ensure they stay in-browser on mobile
+  if (url.toLowerCase().endsWith('.pdf') && !url.includes('docs.google.com/viewer')) {
+    return `https://docs.google.com/viewer?url=${encodeURIComponent(url)}&embedded=true`;
   }
   
   return url;
 };
 
-const PdfViewer = ({ url, title, className, style }: { url: string, title?: string, className?: string, style?: any }) => {
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let active = true;
-    let currentBlobUrl: string | null = null;
-
-    const load = async () => {
-      if (!url) {
-        setLoading(false);
-        return;
-      }
-
-      // If it's already a full external preview link (like docs.google.com), just use it directly
-      if (url.includes('docs.google.com') || !url.includes('type=pdf')) {
-        setBlobUrl(url);
-        setLoading(false);
-        return;
-      }
-
-      setLoading(true);
-      try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        
-        // Check for HTML response (platform security check)
-        const contentType = response.headers.get('content-type');
-        if (contentType && contentType.includes('text/html')) {
-          const text = await response.text();
-          if (text.includes('<!doctype html>') || text.includes('<html')) {
-            throw new Error("Platform security check required. Please refresh the page or open the app in a new tab to re-authenticate.");
-          }
-        }
-
-        const blob = await response.blob();
-        if (active) {
-          currentBlobUrl = URL.createObjectURL(blob);
-          setBlobUrl(currentBlobUrl);
-        }
-      } catch (err: any) {
-        if (active) {
-          console.error("PDF Load Error:", err);
-          setError(err.message);
-        }
-      } finally {
-        if (active) setLoading(false);
-      }
-    };
-
-    load().catch(err => {
-      console.error("Critical PDF Load Error:", err);
-      if (active) {
-        setError(err.message || "An unexpected error occurred while loading the PDF.");
-        setLoading(false);
-      }
-    });
-
-    return () => {
-      active = false;
-      if (currentBlobUrl) {
-        URL.revokeObjectURL(currentBlobUrl);
-      }
-    };
-  }, [url]);
-
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full bg-gray-50 text-gray-400">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mb-4"></div>
-        <p className="font-bold animate-pulse">Loading Question Paper...</p>
-      </div>
-    );
-  }
-
-  if (error || !blobUrl) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-gray-50">
-        <AlertTriangle className="w-16 h-16 text-orange-500 mb-4" />
-        <p className="text-gray-900 font-bold mb-2 text-xl">Unable to load PDF</p>
-        <p className="text-sm text-gray-500 mb-6 max-w-md">
-          {error === 'TypeError: Failed to fetch' 
-            ? "Network error. This might be due to security restrictions or a connection issue." 
-            : `Error: ${error || 'Unknown error'}`}
-        </p>
-        <div className="flex gap-4">
-          <button 
-            onClick={() => window.location.reload()}
-            className="bg-primary text-white px-6 py-2 rounded-lg font-bold shadow-md hover:bg-primary/90 transition"
-          >
-            Retry
-          </button>
-          <a 
-            href={url} 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="bg-white border border-gray-200 text-gray-600 px-6 py-2 rounded-lg font-bold shadow-sm hover:bg-gray-50 transition flex items-center gap-2"
-          >
-            <ExternalLink className="w-4 h-4" /> Open Directly
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <iframe 
-      src={blobUrl} 
-      className={className} 
-      style={style} 
-      title={title}
-      referrerPolicy="no-referrer"
-    />
-  );
-};
-
-const getDriveViewUrl = (idOrUrl: string, forcePdf: boolean = false) => {
+const getDriveViewUrl = (idOrUrl: string) => {
   if (!idOrUrl) return '';
-  if (idOrUrl.startsWith('http')) {
-    // If it's already our proxy but missing hint, add it if forced
-    if (forcePdf && idOrUrl.includes('/api/drive/file/') && !idOrUrl.includes('.pdf')) {
-      const [base, query] = idOrUrl.split('?');
-      const newBase = base.endsWith('.pdf') ? base : `${base}.pdf`;
-      const newQuery = query ? `${query}&type=pdf` : 'type=pdf';
-      return `${newBase}?${newQuery}`;
-    }
-    return idOrUrl;
-  }
-  
-  const cleanId = idOrUrl.split('?')[0];
-  if (forcePdf) {
-    const finalId = cleanId.endsWith('.pdf') ? cleanId : `${cleanId}.pdf`;
-    return `/api/drive/file/${finalId}?type=pdf`;
-  }
-  
-  return `/api/drive/file/${cleanId}`;
+  if (idOrUrl.startsWith('http')) return idOrUrl;
+  return `https://drive.google.com/file/d/${idOrUrl}/view`;
 };
 
 const downloadSubmissionAsPdf = async (submission: any, showNotification: (m: string, t?: 'success' | 'error') => void) => {
   const pageIds = submission.page_ids || [];
   if (pageIds.length === 0) {
     if (submission.google_drive_file_id) {
-      window.open(getDriveViewUrl(submission.google_drive_file_id, true), '_blank');
+      window.open(getDriveViewUrl(submission.google_drive_file_id), '_blank');
       return;
     }
     showNotification("No pages found for this submission.", 'error');
@@ -311,9 +168,24 @@ const DriveImage = ({ fileId, className, alt, crossOrigin }: { fileId: string, c
   useEffect(() => {
     if (!driveId) return;
     
-    const fetchImage = async () => {
+    const fetchImage = async (retryCount = 0) => {
       setLoading(true);
       try {
+        // Ensure Google API is initialized
+        await initGoogleApi();
+
+        let token = (window as any).gapi?.client?.getToken();
+        
+        // If no token, try silent authorize if we have authorized before
+        if (!token && sessionStorage.getItem('google_drive_authorized') === 'true') {
+          try {
+            await authorize(true);
+            token = (window as any).gapi?.client?.getToken();
+          } catch (e) {
+            console.warn("Silent authorize failed in DriveImage", e);
+          }
+        }
+
         // If it's already a full URL (non-drive), just use it
         if (driveId.startsWith('http')) {
           setSrc(driveId);
@@ -321,11 +193,37 @@ const DriveImage = ({ fileId, className, alt, crossOrigin }: { fileId: string, c
           return;
         }
 
-        // Use backend proxy
-        setSrc(`/api/drive/file/${driveId}`);
-        setLoading(false);
-      } catch (err) {
-        console.error("Error loading drive image:", err);
+        if (token && token.access_token) {
+          const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveId}?alt=media`, {
+            headers: { 'Authorization': 'Bearer ' + token.access_token }
+          });
+          if (!resp.ok) {
+            const errorText = await resp.text();
+            console.error(`Google Drive Fetch Error (DriveImage): ${resp.status} ${resp.statusText}`, errorText);
+            
+            if (resp.status === 401 && retryCount < 1) {
+              // Token might be expired, try to refresh silently
+              await authorize(true);
+              return fetchImage(retryCount + 1);
+            }
+            throw new Error(`Failed to fetch image: ${resp.status} ${resp.statusText}`);
+          }
+          const blob = await resp.blob();
+          setSrc(URL.createObjectURL(blob));
+        } else {
+          // Fallback to public link
+          setSrc(`https://drive.google.com/uc?id=${driveId}&export=download`);
+        }
+      } catch (err: any) {
+        console.error("Error fetching drive image:", err);
+        if (err.message === 'Failed to fetch') {
+          console.warn("CORS or network error fetching drive image. Falling back to public link.");
+          setSrc(`https://drive.google.com/uc?id=${driveId}&export=download`);
+        } else {
+          // Fallback to public link if fetch fails for other reasons
+          setSrc(`https://drive.google.com/uc?id=${driveId}&export=download`);
+        }
+      } finally {
         setLoading(false);
       }
     };
@@ -333,9 +231,16 @@ const DriveImage = ({ fileId, className, alt, crossOrigin }: { fileId: string, c
     fetchImage();
   }, [driveId]);
 
+  // Cleanup blob URL
+  useEffect(() => {
+    return () => {
+      if (src && src.startsWith('blob:')) URL.revokeObjectURL(src);
+    };
+  }, [src]);
+
   if (loading) return <div className={cn(className, "flex items-center justify-center bg-gray-100")}><Loader2 className="animate-spin text-primary" /></div>;
 
-  return <img src={src} className={className} alt={alt} crossOrigin={crossOrigin} referrerPolicy="no-referrer" />;
+  return <img src={src} className={className} alt={alt} crossOrigin={crossOrigin} />;
 };
 
 // --- Components ---
@@ -343,61 +248,45 @@ const DriveImage = ({ fileId, className, alt, crossOrigin }: { fileId: string, c
 const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [fullName, setFullName] = useState('');
-  const [role, setRole] = useState<'student' | 'teacher'>('student');
-  const [isSignUp, setIsSignUp] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleAuth = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    console.log('Attempting login for:', email);
     
     try {
-      if (isSignUp) {
-        const { data, error: signUpError } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              full_name: fullName,
-              role: role
-            }
-          }
-        });
-
-        if (signUpError) throw signUpError;
-        if (!data.user) throw new Error("Signup failed");
-
-        // Create profile
-        const { error: profileError } = await supabase.from('profiles').insert({
-          id: data.user.id,
-          email,
-          full_name: fullName,
-          role: role
-        });
-
-        if (profileError) {
-          console.error("Profile creation error:", profileError);
-          // Even if profile creation fails, the user is signed up. 
-          // We'll try to proceed or show a warning.
-        }
-
-        onLogin(data.user);
-      } else {
-        const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
-        
-        if (authError) {
-          console.error('Auth error:', authError);
-          throw authError;
-        }
-        
-        onLogin(data.user);
+      const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+      
+      if (authError) {
+        console.error('Auth error:', authError);
+        throw authError;
       }
+      
+      console.log('Login successful, user ID:', data.user?.id);
+      
+      // Capture geolocation (non-blocking)
+      if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            console.log('Geolocation captured:', pos.coords.latitude, pos.coords.longitude);
+            const { error: logError } = await supabase.from('login_logs').insert({
+              user_id: data.user.id,
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+            });
+            if (logError) console.error('Login log error:', logError);
+          },
+          (err) => console.warn("Geolocation failed:", err.message)
+        );
+      }
+
+      onLogin(data.user);
     } catch (err: any) {
-      console.error('Auth catch error:', err);
-      setError(err.message || "Authentication failed. Please check your credentials.");
+      console.error('Login catch error:', err);
+      setError(err.message || "Invalid login credentials. Please check your email and password.");
     } finally {
       setLoading(false);
     }
@@ -415,7 +304,7 @@ const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
             <Shield className="w-8 h-8 text-primary" />
           </div>
           <h1 className="text-3xl font-bold text-gray-900">Examfriendly</h1>
-          <p className="text-gray-500 mt-2">{isSignUp ? 'Create your account' : 'Secure Proctoring Platform'}</p>
+          <p className="text-gray-500 mt-2">Secure Proctoring Platform</p>
         </div>
 
         {error && (
@@ -425,33 +314,7 @@ const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
           </div>
         )}
 
-        <form onSubmit={handleAuth} className="space-y-4">
-          {isSignUp && (
-            <>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                <input 
-                  type="text" 
-                  required
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition"
-                  placeholder="John Doe"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">I am a...</label>
-                <select 
-                  value={role}
-                  onChange={(e: any) => setRole(e.target.value)}
-                  className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition"
-                >
-                  <option value="student">Student</option>
-                  <option value="teacher">Teacher</option>
-                </select>
-              </div>
-            </>
-          )}
+        <form onSubmit={handleLogin} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
             <input 
@@ -479,21 +342,13 @@ const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
             disabled={loading}
             className="w-full bg-primary hover:bg-primary/90 text-white font-bold py-3 rounded-lg transition transform active:scale-95 disabled:opacity-50 mt-4"
           >
-            {loading ? 'Processing...' : (isSignUp ? 'Sign Up' : 'Sign In')}
+            {loading ? 'Authenticating...' : 'Sign In'}
           </button>
         </form>
 
-        <div className="mt-6 text-center">
-          <button 
-            onClick={() => setIsSignUp(!isSignUp)}
-            className="text-sm text-primary hover:underline font-medium"
-          >
-            {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
-          </button>
-        </div>
-
         <div className="mt-6 text-center text-xs text-gray-400">
           <p>Only authorized users can access the platform.</p>
+          <p className="mt-1">Contact your administrator for account creation.</p>
         </div>
       </motion.div>
     </div>
@@ -518,6 +373,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
   const [showSubmissionModal, setShowSubmissionModal] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [activeWarning, setActiveWarning] = useState<any | null>(null);
+  const [isDriveConnected, setIsDriveConnected] = useState(isAuthorized());
   const [isPaused, setIsPaused] = useState(test.is_paused);
   const [showQuestionPaper, setShowQuestionPaper] = useState(false);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
@@ -534,6 +390,16 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
   const screenVideoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const authorized = isAuthorized();
+      if (authorized !== isDriveConnected) {
+        setIsDriveConnected(authorized);
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [isDriveConnected]);
 
   useEffect(() => {
     const channel = supabase
@@ -631,7 +497,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
           details: `Fullscreen exit detected at ${new Date().toISOString()}`
         };
         if (navigator.onLine) {
-          supabase.from('proctoring_logs').insert(log).then(null, err => console.error('Fullscreen exit log rejection:', err));
+          supabase.from('proctoring_logs').insert(log).then();
         } else {
           setOfflineBuffer(prev => ({ ...prev, logs: [...prev.logs, log] }));
         }
@@ -678,7 +544,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
             details: `High noise level detected (${Math.round(average)}) at ${new Date().toISOString()}`
           };
           if (navigator.onLine) {
-          supabase.from('proctoring_logs').insert(log).then(null, err => console.error('High noise log rejection:', err));
+            supabase.from('proctoring_logs').insert(log).then();
           } else {
             setOfflineBuffer(prev => ({ ...prev, logs: [...prev.logs, log] }));
           }
@@ -771,7 +637,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
         last_seen: new Date().toISOString()
       }, { onConflict: 'test_id,user_id' }).then(({ error }) => {
         if (error) console.error('Initial session upsert error:', error);
-      }, err => console.error('Initial session upsert rejection:', err));
+      });
     }
 
     // Real-time listener for test updates (Pause/Modify timing)
@@ -844,7 +710,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
           type: 'camera'
         }).then(({ error }) => {
           if (error) console.error('Error sending camera snapshot:', error);
-        }, err => console.error('Camera snapshot rejection:', err));
+        });
       }
 
       // Screen Snapshot
@@ -862,7 +728,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
           type: 'screen'
         }).then(({ error }) => {
           if (error) console.error('Error sending screen snapshot:', error);
-        }, err => console.error('Screen snapshot rejection:', err));
+        });
       }
 
       // Heartbeat
@@ -875,7 +741,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
         audio_level: Math.round(currentAudioLevel)
       }, { onConflict: 'test_id,user_id' }).then(({ error }) => {
         if (error) console.error('Heartbeat error:', error);
-      }, err => console.error('Heartbeat rejection:', err));
+      });
 
     }, lowDataMode ? 15000 : 5000);
 
@@ -892,12 +758,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
         clearInterval(timer);
         showNotification("Time's up! You have been removed from the exam room.", 'error');
         // Mark session as inactive in background
-        supabase.from('live_sessions')
-          .update({ is_active: false })
-          .eq('user_id', user.id)
-          .then(({ error }) => {
-            if (error) console.error('Error marking session inactive:', error);
-          }, err => console.error('Session inactive update rejection:', err));
+        supabase.from('live_sessions').update({ is_active: false }).eq('user_id', user.id);
         onFinish();
       }
     }, 1000);
@@ -913,7 +774,7 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
         };
         
         if (navigator.onLine) {
-          supabase.from('proctoring_logs').insert(log).then(null, err => console.error('Tab switch log rejection:', err));
+          supabase.from('proctoring_logs').insert(log).then();
         } else {
           setOfflineBuffer(prev => ({ ...prev, logs: [...prev.logs, log] }));
         }
@@ -1100,35 +961,25 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
       {showQuestionPaper && (
         <div className="fixed inset-0 bg-white z-[150] flex flex-col">
           <header className="p-4 border-b flex justify-between items-center bg-gray-50">
-            <div className="flex items-center gap-4">
-              <h3 className="font-bold">Question Paper: {test.title}</h3>
-              <button 
-                onClick={() => window.open(getEmbedUrl(test.question_paper_url), '_blank')}
-                className="text-xs bg-white border border-gray-200 px-3 py-1 rounded hover:bg-gray-100 transition flex items-center gap-1"
-              >
-                <ExternalLink className="w-3 h-3" /> Open in New Tab
-              </button>
-            </div>
+            <h3 className="font-bold">Question Paper: {test.title}</h3>
             <button onClick={() => setShowQuestionPaper(false)} className="bg-primary text-white px-4 py-2 rounded-lg font-bold">Close Paper</button>
           </header>
           <div className="flex-1 p-0 md:p-8 overflow-auto flex justify-center bg-gray-100">
             <div className="max-w-5xl w-full bg-white shadow-2xl min-h-full border flex flex-col">
-              {test.question_paper_url?.includes('drive.google.com') || 
-               test.question_paper_url?.includes('docs.google.com') || 
-               test.question_paper_url?.includes('/api/drive/file/') ||
-               test.question_paper_url?.startsWith('local_') ||
-               /^[a-zA-Z0-9_-]{25,45}$/.test(test.question_paper_url || '') ? (
-                <PdfViewer 
-                  url={getEmbedUrl(test.question_paper_url)} 
+              {test.question_paper_url?.includes('drive.google.com') || test.question_paper_url?.includes('docs.google.com') || /^[a-zA-Z0-9_-]{25,45}$/.test(test.question_paper_url || '') ? (
+                <iframe 
+                  src={getEmbedUrl(test.question_paper_url)} 
                   className="w-full flex-1 border-0" 
+                  allow="autoplay; fullscreen"
                   title="Question Paper"
                   style={{ minHeight: isMobile ? '80vh' : 'auto' }}
                 />
               ) : test.question_paper_url?.startsWith('http') ? (
-                <PdfViewer 
-                  url={test.question_paper_url} 
+                <iframe 
+                  src={test.question_paper_url} 
                   className="w-full flex-1 border-0" 
                   title="Question Paper" 
+                  allow="autoplay; fullscreen"
                   style={{ minHeight: isMobile ? '80vh' : 'auto' }}
                 />
               ) : (
@@ -1280,6 +1131,22 @@ const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, u
           {formatTime(timeLeft)}
         </div>
         <div className="flex items-center gap-4">
+          {!isDriveConnected && (
+            <button 
+              onClick={async () => {
+                try {
+                  await authorize();
+                  setIsDriveConnected(true);
+                } catch (err) {
+                  console.error(err);
+                  alert("Failed to connect Google Drive. Please allow popups.");
+                }
+              }}
+              className="bg-blue-50 text-blue-600 px-3 py-1.5 rounded-lg font-bold text-sm flex items-center gap-1 hover:bg-blue-100 transition"
+            >
+              <Cloud className="w-4 h-4" /> Connect Drive
+            </button>
+          )}
           <button 
             onClick={() => {
               if (!proctorStatus.camera || !proctorStatus.mic || !proctorStatus.screen) {
@@ -1497,9 +1364,16 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
   const [correctedFile, setCorrectedFile] = useState<File | null>(null);
   const [isUploadingCorrected, setIsUploadingCorrected] = useState(false);
   const [correctedFileId, setCorrectedFileId] = useState<string | null>(submission.corrected_file_id || null);
+  const [googleAuthorized, setGoogleAuthorized] = useState(isAuthorized());
 
   const pageIds = submission.page_ids || [];
   const totalPages = pageIds.length;
+
+  useEffect(() => {
+    checkAuth().then(authorized => {
+      setGoogleAuthorized(authorized);
+    });
+  }, []);
 
   useEffect(() => {
     const resize = () => {
@@ -1613,9 +1487,14 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
     const file = e.target.files?.[0];
     if (!file) return;
     
+    if (!googleAuthorized) {
+      showNotification("Please authorize Google Drive first", 'error');
+      return;
+    }
+    
     setIsUploadingCorrected(true);
     try {
-      const fileId = await uploadToDrive(file, `Corrected_${submission.profiles?.full_name}_${file.name}`, submission.profiles?.email, submission.test_id);
+      const fileId = await uploadToDrive(file, `Corrected_${submission.profiles?.full_name}_${file.name}`, submission.profiles?.email);
       setCorrectedFileId(fileId);
       setCorrectedFile(file);
       showNotification("Corrected copy uploaded successfully!");
@@ -1747,7 +1626,7 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
     showNotification("Uploading corrected PDF to Drive...");
     const pdfBlob = doc.output('blob') as Blob;
     const fileName = `Corrected_Submission_${submission.profiles?.full_name}_${Date.now()}.pdf`;
-    return await uploadToDrive(pdfBlob, fileName, submission.profiles?.email, submission.test_id);
+    return await uploadToDrive(pdfBlob, fileName, submission.profiles?.email);
   };
 
   const saveGrading = async (isReturn = false) => {
@@ -1986,7 +1865,22 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
           
           <div className="border-t pt-4">
             <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Corrected Copy</label>
-            {correctedFileId ? (
+            {!googleAuthorized ? (
+              <button 
+                onClick={async () => {
+                  try {
+                    await authorize();
+                    setGoogleAuthorized(true);
+                  } catch (err) {
+                    showNotification("Google Drive authorization failed", 'error');
+                  }
+                }}
+                className="w-full p-4 border-2 border-dashed border-primary/30 rounded-lg text-primary font-bold text-xs hover:bg-primary/5 transition flex flex-col items-center gap-2"
+              >
+                <Lock className="w-6 h-6" />
+                Authorize Google Drive
+              </button>
+            ) : correctedFileId ? (
               <div className="bg-green-50 p-3 rounded-lg border border-green-100 mb-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 text-green-700">
@@ -2003,7 +1897,7 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
                   </button>
                 </div>
                 <button 
-                  onClick={() => window.open(getDriveViewUrl(correctedFileId!, true), '_blank')}
+                  onClick={() => window.open(getDriveViewUrl(correctedFileId), '_blank')}
                   className="mt-2 text-[10px] text-green-600 font-bold hover:underline flex items-center gap-1"
                 >
                   <ExternalLink className="w-3 h-3" /> View Uploaded File
@@ -2051,7 +1945,7 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
 
 const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () => void }) => {
   const [currentPage, setCurrentPage] = useState(0);
-  const [showCorrected, setShowCorrected] = useState(false);
+  const [googleAuthorized, setGoogleAuthorized] = useState(isAuthorized());
   const containerRef = useRef<HTMLDivElement>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   
@@ -2081,6 +1975,12 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
     return normalized;
   });
   const textComments = submission.grade_data?.comments || {};
+
+  useEffect(() => {
+    checkAuth().then(authorized => {
+      setGoogleAuthorized(authorized);
+    });
+  }, []);
 
   useEffect(() => {
     const resize = () => {
@@ -2119,25 +2019,25 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
         <div className="flex items-center gap-4">
           {submission.corrected_file_id && (
             <button 
-              onClick={() => setShowCorrected(!showCorrected)}
-              className={cn(
-                "flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-lg transition text-xs md:text-sm font-bold border",
-                showCorrected 
-                  ? "bg-primary text-white border-primary shadow-lg shadow-primary/20" 
-                  : "bg-green-50 text-green-600 border-green-100 hover:bg-green-100"
-              )}
+              onClick={() => window.open(getDriveViewUrl(submission.corrected_file_id), '_blank')}
+              className="flex items-center gap-2 bg-green-50 text-green-600 px-3 py-1.5 md:px-4 md:py-2 rounded-lg hover:bg-green-100 transition text-xs md:text-sm font-bold border border-green-100"
             >
-              {showCorrected ? <FileText className="w-4 h-4" /> : <FileCheck className="w-4 h-4" />}
-              {showCorrected ? "View Original" : "View Corrected Copy"}
+              <FileCheck className="w-4 h-4" /> View Corrected Copy
             </button>
           )}
-          {submission.corrected_file_id && (
+          {!googleAuthorized && (
             <button 
-              onClick={() => window.open(getDriveViewUrl(submission.corrected_file_id, true), '_blank')}
-              className="p-2 text-gray-400 hover:text-primary transition"
-              title="Open in New Tab"
+              onClick={async () => {
+                try {
+                  await authorize();
+                  setGoogleAuthorized(true);
+                } catch (err) {
+                  console.error("Auth failed", err);
+                }
+              }}
+              className="flex items-center gap-2 bg-primary text-white px-3 py-1.5 md:px-4 md:py-2 rounded-lg hover:bg-primary/90 transition text-xs md:text-sm font-bold shadow-sm"
             >
-              <ExternalLink className="w-4 h-4" />
+              <Lock className="w-4 h-4" /> Authorize Drive
             </button>
           )}
         </div>
@@ -2145,13 +2045,7 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
 
       <div className="flex-1 flex overflow-hidden p-4 md:p-8 bg-gray-900 overflow-y-auto flex-col items-center">
         <div className="relative bg-white shadow-2xl w-full max-w-5xl aspect-[3/4] md:aspect-auto md:h-[85vh] overflow-hidden shrink-0" ref={containerRef}>
-          {showCorrected && submission.corrected_file_id ? (
-            <PdfViewer 
-              url={getDriveViewUrl(submission.corrected_file_id, true)}
-              className="absolute inset-0 w-full h-full border-none"
-              title="Corrected Submission"
-            />
-          ) : pageIds.length > 0 ? (
+          {pageIds.length > 0 ? (
             <>
               <DriveImage 
                 fileId={pageIds[currentPage]}
@@ -2204,8 +2098,8 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
               </div>
             </>
           ) : submission.google_drive_file_id ? (
-            <PdfViewer 
-              url={getEmbedUrl(getDriveViewUrl(submission.google_drive_file_id, true))}
+            <iframe 
+              src={getEmbedUrl(getDriveViewUrl(submission.google_drive_file_id))}
               className="absolute inset-0 w-full h-full border-none"
               title="Submission PDF"
             />
@@ -2249,7 +2143,7 @@ const NotificationBell = ({ userId }: { userId: string }) => {
   const [showDropdown, setShowDropdown] = useState(false);
 
   useEffect(() => {
-    fetchNotifications().catch(err => console.error('Initial notification fetch rejection:', err));
+    fetchNotifications();
     const channel = supabase
       .channel(`notifications_${userId}`)
       .on('postgres_changes', { 
@@ -2258,7 +2152,7 @@ const NotificationBell = ({ userId }: { userId: string }) => {
         table: 'notifications',
         filter: `user_id=eq.${userId}`
       }, () => {
-        fetchNotifications().catch(err => console.error('Channel notification fetch rejection:', err));
+        fetchNotifications();
       })
       .subscribe();
 
@@ -2278,13 +2172,8 @@ const NotificationBell = ({ userId }: { userId: string }) => {
   };
 
   const markAsRead = async (id: string) => {
-    try {
-      const { error } = await supabase.from('notifications').update({ is_read: true }).eq('id', id);
-      if (error) console.error('Error marking notification as read:', error);
-      fetchNotifications().catch(err => console.error('Mark as read fetch rejection:', err));
-    } catch (err) {
-      console.error('Notification read update rejection:', err);
-    }
+    await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+    fetchNotifications();
   };
 
   const unreadCount = notifications.filter(n => !n.is_read).length;
@@ -2367,16 +2256,16 @@ const LiveProctoringView = ({ test, onBack }: { test: Test, onBack: () => void }
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetchActiveSessions().catch(err => console.error('Initial sessions fetch rejection:', err));
-    fetchLogs().catch(err => console.error('Initial logs fetch rejection:', err));
-    fetchSnapshots().catch(err => console.error('Initial snapshots fetch rejection:', err));
-    fetchChats().catch(err => console.error('Initial chats fetch rejection:', err));
+    fetchActiveSessions();
+    fetchLogs();
+    fetchSnapshots();
+    fetchChats();
 
     const sessionChannel = supabase
       .channel(`live_sessions_${test.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `test_id=eq.${test.id}` }, (payload) => {
         console.log('Session change detected:', payload);
-        fetchActiveSessions().catch(err => console.error('Channel sessions fetch rejection:', err));
+        fetchActiveSessions();
       })
       .subscribe();
 
@@ -2384,7 +2273,7 @@ const LiveProctoringView = ({ test, onBack }: { test: Test, onBack: () => void }
       .channel(`proctoring_logs_${test.id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'proctoring_logs', filter: `test_id=eq.${test.id}` }, (payload) => {
         console.log('Log change detected:', payload);
-        fetchLogs().catch(err => console.error('Channel logs fetch rejection:', err));
+        fetchLogs();
       })
       .subscribe();
 
@@ -2392,7 +2281,7 @@ const LiveProctoringView = ({ test, onBack }: { test: Test, onBack: () => void }
       .channel(`live_snapshots_${test.id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_snapshots', filter: `test_id=eq.${test.id}` }, (payload) => {
         console.log('Snapshot change detected:', payload);
-        fetchSnapshots().catch(err => console.error('Channel snapshots fetch rejection:', err));
+        fetchSnapshots();
       })
       .subscribe();
 
@@ -2510,9 +2399,9 @@ const LiveProctoringView = ({ test, onBack }: { test: Test, onBack: () => void }
           <button 
             onClick={() => {
               setLoading(true);
-              fetchActiveSessions().catch(err => console.error('Manual sessions fetch rejection:', err));
-              fetchLogs().catch(err => console.error('Manual logs fetch rejection:', err));
-              fetchSnapshots().catch(err => console.error('Manual snapshots fetch rejection:', err));
+              fetchActiveSessions();
+              fetchLogs();
+              fetchSnapshots();
             }}
             className="p-2 hover:bg-gray-700 rounded-full transition text-gray-400 hover:text-white"
             title="Refresh Data"
@@ -2821,6 +2710,7 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
   const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [editingTestId, setEditingTestId] = useState<string | null>(null);
+  const [googleAuthorized, setGoogleAuthorized] = useState(isAuthorized());
   const [showQuestionPaper, setShowQuestionPaper] = useState(false);
   const [newTestData, setNewTestData] = useState({
     title: '',
@@ -2844,8 +2734,9 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
   };
 
   useEffect(() => {
-    fetchTests().catch(err => console.error('Initial tests fetch rejection:', err));
-    fetchAllProfiles().catch(err => console.error('Initial profiles fetch rejection:', err));
+    fetchTests();
+    fetchAllProfiles();
+    checkAuth().then(setGoogleAuthorized);
   }, [profile]);
 
   const fetchTests = async () => {
@@ -2899,7 +2790,7 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
       } else {
         setIsCreateModalOpen(false);
         setEditingTestId(null);
-        fetchTests().catch(err => console.error('Update test fetch rejection:', err));
+        fetchTests();
         resetTestData();
         showNotification("Test updated successfully!", 'success');
       }
@@ -2917,7 +2808,7 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
         alert("Error creating test: " + error.message);
       } else {
         setIsCreateModalOpen(false);
-        fetchTests().catch(err => console.error('Create test fetch rejection:', err));
+        fetchTests();
         resetTestData();
         showNotification("Test created successfully!", 'success');
       }
@@ -2961,50 +2852,38 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
   };
 
   const handleTogglePause = async (testId: string, currentPaused: boolean) => {
-    try {
-      const { error } = await supabase
-        .from('tests')
-        .update({ is_paused: !currentPaused })
-        .eq('id', testId);
-      if (error) throw error;
-      fetchTests();
-    } catch (err: any) {
-      alert("Error toggling pause: " + err.message);
-    }
+    const { error } = await supabase
+      .from('tests')
+      .update({ is_paused: !currentPaused })
+      .eq('id', testId);
+    if (error) alert(error.message);
+    else fetchTests();
   };
 
   const handleModifyTiming = async (testId: string, extraMinutes: number) => {
-    try {
-      const test = tests.find(t => t.id === testId);
-      if (!test) return;
-      
-      const newEndTime = new Date(new Date(test.end_time).getTime() + extraMinutes * 60000).toISOString();
-      const newDuration = test.duration_minutes + extraMinutes;
+    const test = tests.find(t => t.id === testId);
+    if (!test) return;
+    
+    const newEndTime = new Date(new Date(test.end_time).getTime() + extraMinutes * 60000).toISOString();
+    const newDuration = test.duration_minutes + extraMinutes;
 
-      const { error } = await supabase
-        .from('tests')
-        .update({ end_time: newEndTime, duration_minutes: newDuration })
-        .eq('id', testId);
-      if (error) throw error;
-      fetchTests();
-    } catch (err: any) {
-      alert("Error modifying timing: " + err.message);
-    }
+    const { error } = await supabase
+      .from('tests')
+      .update({ end_time: newEndTime, duration_minutes: newDuration })
+      .eq('id', testId);
+    if (error) alert(error.message);
+    else fetchTests();
   };
 
   const handleDeleteTest = async (testId: string) => {
     setConfirmAction({
       message: "Are you sure you want to delete this test? This action cannot be undone and all submissions will be lost.",
       onConfirm: async () => {
-        try {
-          const { error } = await supabase.from('tests').delete().eq('id', testId);
-          if (error) throw error;
+        const { error } = await supabase.from('tests').delete().eq('id', testId);
+        if (error) showNotification(error.message, 'error');
+        else {
           showNotification("Test deleted successfully", 'success');
           fetchTests();
-        } catch (err: any) {
-          showNotification("Error deleting test: " + err.message, 'error');
-        } finally {
-          setConfirmAction(null);
         }
       }
     });
@@ -3041,35 +2920,25 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
       {showQuestionPaper && selectedTest && (
         <div className="fixed inset-0 bg-black/80 z-[200] flex flex-col">
           <header className="p-4 bg-white flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <h3 className="font-bold">Question Paper Preview: {selectedTest.title}</h3>
-              <button 
-                onClick={() => window.open(getEmbedUrl(selectedTest.question_paper_url), '_blank')}
-                className="text-xs bg-gray-50 border border-gray-200 px-3 py-1 rounded hover:bg-gray-100 transition flex items-center gap-1"
-              >
-                <ExternalLink className="w-3 h-3" /> Open in New Tab
-              </button>
-            </div>
+            <h3 className="font-bold">Question Paper Preview: {selectedTest.title}</h3>
             <button onClick={() => setShowQuestionPaper(false)} className="bg-primary text-white px-4 py-2 rounded-lg font-bold">Close Preview</button>
           </header>
           <div className="flex-1 p-0 md:p-8 overflow-auto flex justify-center bg-gray-100">
             <div className="max-w-5xl w-full bg-white shadow-2xl min-h-full border flex flex-col">
-              {selectedTest.question_paper_url?.includes('drive.google.com') || 
-               selectedTest.question_paper_url?.includes('docs.google.com') || 
-               selectedTest.question_paper_url?.includes('/api/drive/file/') ||
-               selectedTest.question_paper_url?.startsWith('local_') ||
-               /^[a-zA-Z0-9_-]{25,45}$/.test(selectedTest.question_paper_url || '') ? (
-                <PdfViewer 
-                  url={getEmbedUrl(selectedTest.question_paper_url)} 
+              {selectedTest.question_paper_url?.includes('drive.google.com') || selectedTest.question_paper_url?.includes('docs.google.com') || /^[a-zA-Z0-9_-]{25,45}$/.test(selectedTest.question_paper_url || '') ? (
+                <iframe 
+                  src={getEmbedUrl(selectedTest.question_paper_url)} 
                   className="w-full flex-1 border-0" 
+                  allow="autoplay; fullscreen"
                   title="Question Paper Preview"
                   style={{ minHeight: '80vh' }}
                 />
               ) : selectedTest.question_paper_url?.startsWith('http') ? (
-                <PdfViewer 
-                  url={selectedTest.question_paper_url} 
+                <iframe 
+                  src={selectedTest.question_paper_url} 
                   className="w-full flex-1 border-0" 
                   title="Question Paper Preview" 
+                  allow="autoplay; fullscreen"
                   style={{ minHeight: '80vh' }}
                 />
               ) : (
@@ -3124,6 +2993,23 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
         <header className="bg-white border-b px-8 py-4 flex items-center justify-between">
           <h2 className="text-xl font-bold">Welcome, {profile?.full_name || user.email}</h2>
           <div className="flex items-center gap-6">
+            {!googleAuthorized && (
+              <button 
+                onClick={async () => {
+                  try {
+                    await authorize();
+                    setGoogleAuthorized(isAuthorized());
+                    showNotification("Google Drive connected successfully!", 'success');
+                  } catch (err) {
+                    showNotification("Failed to connect Google Drive.", 'error');
+                  }
+                }}
+                className="bg-red-100 text-red-600 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-red-200 transition flex items-center gap-2"
+              >
+                <ShieldAlert className="w-4 h-4" />
+                Connect Drive
+              </button>
+            )}
             <NotificationBell userId={user.id} />
             <label className="flex items-center gap-2 text-sm font-medium text-gray-600 cursor-pointer">
               <input 
@@ -3256,25 +3142,21 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
                           setConfirmAction({
                             message: `Are you sure you want to release scores for all ${submissions.length} students?`,
                             onConfirm: async () => {
-                              try {
-                                const { error } = await supabase
-                                  .from('submissions')
-                                  .update({ 
-                                    is_released: true,
-                                    returned_at: new Date().toISOString()
-                                  })
-                                  .eq('test_id', selectedTest.id)
-                                  .eq('status', 'graded');
-                                
-                                if (error) throw error;
-                                
+                              const { error } = await supabase
+                                .from('submissions')
+                                .update({ 
+                                  is_released: true,
+                                  returned_at: new Date().toISOString()
+                                })
+                                .eq('test_id', selectedTest.id)
+                                .eq('status', 'graded');
+                              
+                              if (error) showNotification(error.message, 'error');
+                              else {
                                 showNotification("All graded scores released successfully!");
                                 fetchSubmissions(selectedTest.id);
-                              } catch (err: any) {
-                                showNotification("Error releasing scores: " + err.message, 'error');
-                              } finally {
-                                setConfirmAction(null);
                               }
+                              setConfirmAction(null);
                             }
                           });
                         }}
@@ -3342,19 +3224,15 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
                             {sub.status === 'graded' && !sub.is_released && (
                               <button 
                                 onClick={async () => {
-                                  try {
-                                    const { error } = await supabase
-                                      .from('submissions')
-                                      .update({ is_released: true, returned_at: new Date().toISOString() })
-                                      .eq('id', sub.id);
-                                    if (!error) {
-                                      showNotification("Submission returned successfully!");
-                                      fetchSubmissions(selectedTest.id);
-                                    } else {
-                                      showNotification(error.message, 'error');
-                                    }
-                                  } catch (err: any) {
-                                    showNotification("Error returning submission: " + err.message, 'error');
+                                  const { error } = await supabase
+                                    .from('submissions')
+                                    .update({ is_released: true, returned_at: new Date().toISOString() })
+                                    .eq('id', sub.id);
+                                  if (!error) {
+                                    showNotification("Submission returned successfully!");
+                                    fetchSubmissions(selectedTest.id);
+                                  } else {
+                                    showNotification(error.message, 'error');
                                   }
                                 }}
                                 className="text-green-600 font-bold text-sm flex items-center gap-1 hover:underline"
@@ -3550,14 +3428,18 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
                           onChange={async (e) => {
                             const file = e.target.files?.[0];
                             if (!file) return;
+                            if (!isAuthorized()) {
+                              alert("Google Drive not connected. Please connect Drive first using the button in the dashboard.");
+                              return;
+                            }
                             try {
-                              const fileId = await uploadToDrive(file, `${newTestData.title}_QuestionPaper.pdf`, user.email!, newTestData.title);
+                              const fileId = await uploadToDrive(file, `${newTestData.title}_QuestionPaper.pdf`, user.email!);
                               const previewUrl = getEmbedUrl(fileId);
                               setNewTestData(prev => ({ ...prev, question_paper_url: previewUrl }));
                               showNotification("Question paper uploaded successfully to Google Drive!", 'success');
-                            } catch (err: any) {
+                            } catch (err) {
                               console.error("Upload error:", err);
-                              showNotification(err.message || "Failed to upload to Google Drive. Please check your connection.", 'error');
+                              showNotification("Failed to upload to Google Drive. Please check your connection.", 'error');
                             }
                           }}
                         />
@@ -3661,7 +3543,7 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
   const [viewingSubmission, setViewingSubmission] = useState<any | null>(null);
 
   useEffect(() => {
-    fetchData().catch(err => console.error('Initial student data fetch rejection:', err));
+    fetchData();
 
     // Subscribe to submission changes
     const subChannel = supabase
@@ -3672,7 +3554,7 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
         table: 'submissions',
         filter: `student_id=eq.${user.id}`
       }, () => {
-        fetchData().catch(err => console.error('Channel student subs fetch rejection:', err));
+        fetchData();
       })
       .subscribe();
 
@@ -3684,7 +3566,7 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
         schema: 'public',
         table: 'tests'
       }, () => {
-        fetchData().catch(err => console.error('Channel student tests fetch rejection:', err));
+        fetchData();
       })
       .subscribe();
 
@@ -3724,20 +3606,18 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
   };
 
   const handleRequestRecheck = async (subId: string) => {
-    try {
-      const sub = submissions.find(s => s.id === subId);
-      if (!sub) return;
+    const sub = submissions.find(s => s.id === subId);
+    if (!sub) return;
+    
+    const test = tests.find(t => t.id === sub.test_id);
+    if (!test) return;
+
+    const { error } = await supabase
+      .from('submissions')
+      .update({ status: 'recheck_requested' })
+      .eq('id', subId);
       
-      const test = tests.find(t => t.id === sub.test_id);
-      if (!test) return;
-
-      const { error } = await supabase
-        .from('submissions')
-        .update({ status: 'recheck_requested' })
-        .eq('id', subId);
-        
-      if (error) throw error;
-
+    if (!error) {
       // Send notification to teacher
       await supabase.from('notifications').insert({
         user_id: test.teacher_id,
@@ -3745,12 +3625,9 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
         message: `${profile.full_name || 'A student'} has requested a recheck for the test "${test.title}".`,
         type: 'recheck'
       });
-      
-      fetchData().catch(err => console.error('Recheck request fetch rejection:', err));
+      fetchData();
       showNotification("Recheck requested successfully!");
-    } catch (err: any) {
-      showNotification("Error requesting recheck: " + err.message, 'error');
-    }
+    } else showNotification(error.message, 'error');
   };
 
   if (loading) return <div className="p-12 text-center text-gray-400">Loading exams...</div>;
@@ -3844,7 +3721,7 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
                           </button>
                           {sub.corrected_file_id && (
                             <button 
-                              onClick={() => window.open(getDriveViewUrl(sub.corrected_file_id, true), '_blank')}
+                              onClick={() => window.open(getDriveViewUrl(sub.corrected_file_id), '_blank')}
                               className="flex-1 bg-green-50 text-green-600 py-2 rounded-lg text-xs font-bold hover:bg-green-100 transition border border-green-100 flex items-center justify-center gap-1"
                             >
                               <FileCheck className="w-3 h-3" /> Corrected Copy
@@ -3918,14 +3795,8 @@ export default function App() {
 
   useEffect(() => {
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      const reason = event.reason?.message || String(event.reason || '');
-      // Ignore Vite HMR WebSocket errors as they are expected in this environment
-      if (reason.includes('WebSocket closed without opened')) {
-        return;
-      }
-      
       console.error('Unhandled Rejection:', event.reason);
-      if (reason === 'Failed to fetch') {
+      if (event.reason?.message === 'Failed to fetch') {
         showNotification("Network error: Failed to fetch. Please check your internet connection or API configuration.", 'error');
       }
     };
@@ -3939,6 +3810,8 @@ export default function App() {
       setLoading(false);
       return;
     }
+
+    initGoogleApi();
 
     // Test Supabase connection
     const testConnection = async () => {
@@ -3958,19 +3831,16 @@ export default function App() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) {
         setUser(session.user);
-        fetchProfile(session.user.id).catch(err => console.error('Initial profile fetch rejection:', err));
+        fetchProfile(session.user.id);
       } else {
         setLoading(false);
       }
-    }).catch(err => {
-      console.error("Error getting session:", err);
-      setLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
       if (session?.user) {
-        fetchProfile(session.user.id).catch(err => console.error('Auth change profile fetch rejection:', err));
+        fetchProfile(session.user.id);
         // 12-hour session auto-logout
         const loginTime = new Date().getTime();
         localStorage.setItem('login_time', loginTime.toString());
@@ -4058,22 +3928,18 @@ export default function App() {
           <div className="space-y-4">
             <button 
               onClick={async () => {
-                try {
-                  console.log('Setting role to admin for user:', user.id);
-                  const { error } = await supabase.from('profiles').insert({
-                    id: user.id,
-                    email: user.email,
-                    role: 'admin'
-                  });
-                  if (!error) {
-                    console.log('Admin profile created successfully');
-                    fetchProfile(user.id);
-                  } else {
-                    console.error('Admin profile creation error:', error);
-                    alert('Error creating profile: ' + error.message);
-                  }
-                } catch (err: any) {
-                  alert('Network error creating profile: ' + err.message);
+                console.log('Setting role to admin for user:', user.id);
+                const { error } = await supabase.from('profiles').insert({
+                  id: user.id,
+                  email: user.email,
+                  role: 'admin'
+                });
+                if (!error) {
+                  console.log('Admin profile created successfully');
+                  fetchProfile(user.id);
+                } else {
+                  console.error('Admin profile creation error:', error);
+                  alert('Error creating profile: ' + error.message);
                 }
               }}
               className="w-full bg-gray-900 text-white font-bold py-3 rounded-lg hover:bg-gray-800 transition"
@@ -4082,22 +3948,18 @@ export default function App() {
             </button>
             <button 
               onClick={async () => {
-                try {
-                  console.log('Setting role to teacher for user:', user.id);
-                  const { error } = await supabase.from('profiles').insert({
-                    id: user.id,
-                    email: user.email,
-                    role: 'teacher'
-                  });
-                  if (!error) {
-                    console.log('Teacher profile created successfully');
-                    fetchProfile(user.id);
-                  } else {
-                    console.error('Teacher profile creation error:', error);
-                    alert('Error creating profile: ' + error.message);
-                  }
-                } catch (err: any) {
-                  alert('Network error creating profile: ' + err.message);
+                console.log('Setting role to teacher for user:', user.id);
+                const { error } = await supabase.from('profiles').insert({
+                  id: user.id,
+                  email: user.email,
+                  role: 'teacher'
+                });
+                if (!error) {
+                  console.log('Teacher profile created successfully');
+                  fetchProfile(user.id);
+                } else {
+                  console.error('Teacher profile creation error:', error);
+                  alert('Error creating profile: ' + error.message);
                 }
               }}
               className="w-full border-2 border-primary text-primary font-bold py-3 rounded-lg hover:bg-primary/5 transition"
@@ -4106,22 +3968,18 @@ export default function App() {
             </button>
             <button 
               onClick={async () => {
-                try {
-                  console.log('Setting role to student for user:', user.id);
-                  const { error } = await supabase.from('profiles').insert({
-                    id: user.id,
-                    email: user.email,
-                    role: 'student'
-                  });
-                  if (!error) {
-                    console.log('Student profile created successfully');
-                    fetchProfile(user.id);
-                  } else {
-                    console.error('Student profile creation error:', error);
-                    alert('Error creating profile: ' + error.message);
-                  }
-                } catch (err: any) {
-                  alert('Network error creating profile: ' + err.message);
+                console.log('Setting role to student for user:', user.id);
+                const { error } = await supabase.from('profiles').insert({
+                  id: user.id,
+                  email: user.email,
+                  role: 'student'
+                });
+                if (!error) {
+                  console.log('Student profile created successfully');
+                  fetchProfile(user.id);
+                } else {
+                  console.error('Student profile creation error:', error);
+                  alert('Error creating profile: ' + error.message);
                 }
               }}
               className="w-full bg-primary text-white font-bold py-3 rounded-lg hover:bg-primary/90 transition"

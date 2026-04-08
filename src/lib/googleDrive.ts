@@ -29,7 +29,7 @@ export async function uploadToDrive(file: Blob, fileName: string, teacherEmail: 
     formData.append('teacherEmail', teacherEmail);
     formData.append('folderName', folderName);
 
-    const apiUrl = `${window.location.origin}/api/drive/upload`;
+    const apiUrl = `/api/drive/upload`;
     const response = await fetch(apiUrl, {
       method: 'POST',
       body: formData,
@@ -76,7 +76,7 @@ export async function fetchDriveFileAsBlob(fileId: string): Promise<Blob> {
   }
 
   try {
-    const apiUrl = `${window.location.origin}/api/drive/file/${driveId}`;
+    const apiUrl = `/api/drive/file/${driveId}`;
     const response = await fetch(apiUrl);
 
     if (!response.ok) {

@@ -97,11 +97,6 @@ const getEmbedUrl = (url: string | undefined) => {
     }
   }
   
-  // Force absolute URL for relative paths to help browsers in iframe contexts
-  if (url.startsWith('/')) {
-    url = `${window.location.origin}${url}`;
-  }
-
   return url;
 };
 
@@ -131,6 +126,16 @@ const PdfViewer = ({ url, title, className, style }: { url: string, title?: stri
       try {
         const response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        // Check for HTML response (platform security check)
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('text/html')) {
+          const text = await response.text();
+          if (text.includes('<!doctype html>') || text.includes('<html')) {
+            throw new Error("Platform security check required. Please refresh the page or open the app in a new tab to re-authenticate.");
+          }
+        }
+
         const blob = await response.blob();
         if (active) {
           currentBlobUrl = URL.createObjectURL(blob);
@@ -212,11 +217,11 @@ const PdfViewer = ({ url, title, className, style }: { url: string, title?: stri
   );
 };
 
-const getDriveViewUrl = (idOrUrl: string) => {
+const getDriveViewUrl = (idOrUrl: string, forcePdf: boolean = false) => {
   if (!idOrUrl) return '';
   if (idOrUrl.startsWith('http')) {
-    // If it's already our proxy but missing hint, add it
-    if (idOrUrl.includes('/api/drive/file/') && !idOrUrl.includes('.pdf')) {
+    // If it's already our proxy but missing hint, add it if forced
+    if (forcePdf && idOrUrl.includes('/api/drive/file/') && !idOrUrl.includes('.pdf')) {
       const [base, query] = idOrUrl.split('?');
       const newBase = base.endsWith('.pdf') ? base : `${base}.pdf`;
       const newQuery = query ? `${query}&type=pdf` : 'type=pdf';
@@ -225,18 +230,20 @@ const getDriveViewUrl = (idOrUrl: string) => {
     return idOrUrl;
   }
   
-  // Ensure we have the .pdf hint for the backend proxy
   const cleanId = idOrUrl.split('?')[0];
-  const finalId = cleanId.endsWith('.pdf') ? cleanId : `${cleanId}.pdf`;
+  if (forcePdf) {
+    const finalId = cleanId.endsWith('.pdf') ? cleanId : `${cleanId}.pdf`;
+    return `/api/drive/file/${finalId}?type=pdf`;
+  }
   
-  return `${window.location.origin}/api/drive/file/${finalId}?type=pdf`;
+  return `/api/drive/file/${cleanId}`;
 };
 
 const downloadSubmissionAsPdf = async (submission: any, showNotification: (m: string, t?: 'success' | 'error') => void) => {
   const pageIds = submission.page_ids || [];
   if (pageIds.length === 0) {
     if (submission.google_drive_file_id) {
-      window.open(getDriveViewUrl(submission.google_drive_file_id), '_blank');
+      window.open(getDriveViewUrl(submission.google_drive_file_id, true), '_blank');
       return;
     }
     showNotification("No pages found for this submission.", 'error');
@@ -1996,7 +2003,7 @@ const GradingView = ({ submission, onBack, showNotification }: { submission: any
                   </button>
                 </div>
                 <button 
-                  onClick={() => window.open(getDriveViewUrl(correctedFileId), '_blank')}
+                  onClick={() => window.open(getDriveViewUrl(correctedFileId!, true), '_blank')}
                   className="mt-2 text-[10px] text-green-600 font-bold hover:underline flex items-center gap-1"
                 >
                   <ExternalLink className="w-3 h-3" /> View Uploaded File
@@ -2126,7 +2133,7 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
           )}
           {submission.corrected_file_id && (
             <button 
-              onClick={() => window.open(getDriveViewUrl(submission.corrected_file_id), '_blank')}
+              onClick={() => window.open(getDriveViewUrl(submission.corrected_file_id, true), '_blank')}
               className="p-2 text-gray-400 hover:text-primary transition"
               title="Open in New Tab"
             >
@@ -2140,7 +2147,7 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
         <div className="relative bg-white shadow-2xl w-full max-w-5xl aspect-[3/4] md:aspect-auto md:h-[85vh] overflow-hidden shrink-0" ref={containerRef}>
           {showCorrected && submission.corrected_file_id ? (
             <PdfViewer 
-              url={getDriveViewUrl(submission.corrected_file_id)}
+              url={getDriveViewUrl(submission.corrected_file_id, true)}
               className="absolute inset-0 w-full h-full border-none"
               title="Corrected Submission"
             />
@@ -2198,7 +2205,7 @@ const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () 
             </>
           ) : submission.google_drive_file_id ? (
             <PdfViewer 
-              url={getEmbedUrl(getDriveViewUrl(submission.google_drive_file_id))}
+              url={getEmbedUrl(getDriveViewUrl(submission.google_drive_file_id, true))}
               className="absolute inset-0 w-full h-full border-none"
               title="Submission PDF"
             />
@@ -3548,9 +3555,9 @@ const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }:
                               const previewUrl = getEmbedUrl(fileId);
                               setNewTestData(prev => ({ ...prev, question_paper_url: previewUrl }));
                               showNotification("Question paper uploaded successfully to Google Drive!", 'success');
-                            } catch (err) {
+                            } catch (err: any) {
                               console.error("Upload error:", err);
-                              showNotification("Failed to upload to Google Drive. Please check your connection.", 'error');
+                              showNotification(err.message || "Failed to upload to Google Drive. Please check your connection.", 'error');
                             }
                           }}
                         />
@@ -3837,7 +3844,7 @@ const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { us
                           </button>
                           {sub.corrected_file_id && (
                             <button 
-                              onClick={() => window.open(getDriveViewUrl(sub.corrected_file_id), '_blank')}
+                              onClick={() => window.open(getDriveViewUrl(sub.corrected_file_id, true), '_blank')}
                               className="flex-1 bg-green-50 text-green-600 py-2 rounded-lg text-xs font-bold hover:bg-green-100 transition border border-green-100 flex items-center justify-center gap-1"
                             >
                               <FileCheck className="w-3 h-3" /> Corrected Copy

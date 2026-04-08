@@ -16,7 +16,7 @@ import Cropper from 'react-easy-crop';
 import { Area } from 'react-easy-crop';
 import { jsPDF } from 'jspdf';
 import { getCroppedImg } from '../lib/cropImage';
-import { uploadToDrive, authorize, isAuthorized } from '../lib/googleDrive';
+import { uploadToDrive } from '../lib/googleDrive';
 import { supabase, Test } from '../lib/supabase';
 
 interface SubmissionModalProps {
@@ -42,19 +42,6 @@ export const SubmissionModal: React.FC<SubmissionModalProps> = ({ test, user, in
     }))
   );
   const [isUploading, setIsUploading] = useState(false);
-  const [isAuthorizing, setIsAuthorizing] = useState(false);
-  const [isAuthorizedState, setIsAuthorizedState] = useState(isAuthorized());
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const authorized = isAuthorized();
-      if (authorized !== isAuthorizedState) {
-        setIsAuthorizedState(authorized);
-      }
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [isAuthorizedState]);
-
   const [error, setError] = useState<string | null>(null);
   
   // Cropping state
@@ -69,20 +56,6 @@ export const SubmissionModal: React.FC<SubmissionModalProps> = ({ test, user, in
   const onCropComplete = useCallback((_croppedArea: Area, croppedAreaPixels: Area) => {
     setCroppedAreaPixels(croppedAreaPixels);
   }, []);
-
-  const handleAuthorize = async () => {
-    setIsAuthorizing(true);
-    setError(null);
-    try {
-      await authorize();
-      setIsAuthorizedState(true);
-    } catch (err: any) {
-      console.error("Authorization error:", err);
-      setError("Failed to authorize Google Drive. Please allow popups and try again.");
-    } finally {
-      setIsAuthorizing(false);
-    }
-  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -153,17 +126,13 @@ export const SubmissionModal: React.FC<SubmissionModalProps> = ({ test, user, in
     setError(null);
 
     try {
-      if (!isAuthorized()) {
-        throw new Error("Google Drive not authorized. Please click 'Connect Google Drive' first.");
-      }
-
       // 1. Upload individual images to Google Drive
       const pageIds: string[] = [];
       for (let i = 0; i < images.length; i++) {
         const response = await fetch(images[i].src);
         const blob = await response.blob();
         const fileName = `Page_${i + 1}_${test.title}_${user.email}_${Date.now()}.jpg`;
-        const fileId = await uploadToDrive(blob, fileName, 'developer@examfriendly.in', 'image/jpeg');
+        const fileId = await uploadToDrive(blob, fileName, 'developer@examfriendly.in', test.title, 'image/jpeg');
         pageIds.push(fileId);
       }
 
@@ -291,47 +260,27 @@ export const SubmissionModal: React.FC<SubmissionModalProps> = ({ test, user, in
           <button 
             onClick={onClose}
             className="flex-1 py-4 font-bold text-gray-500 hover:text-gray-700 transition"
-            disabled={isUploading || isAuthorizing}
+            disabled={isUploading}
           >
             Cancel
           </button>
-          {!isAuthorizedState ? (
-            <button 
-              onClick={handleAuthorize}
-              disabled={isAuthorizing}
-              className="flex-[2] py-4 bg-blue-600 text-white rounded-xl font-bold shadow-lg hover:bg-blue-700 transition flex items-center justify-center gap-2"
-            >
-              {isAuthorizing ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Authorizing...
-                </>
-              ) : (
-                <>
-                  <Check className="w-5 h-5" />
-                  Connect Google Drive
-                </>
-              )}
-            </button>
-          ) : (
-            <button 
-              onClick={handleSubmit}
-              disabled={isUploading || images.length === 0}
-              className="flex-[2] py-4 bg-primary text-white rounded-xl font-bold shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-50 disabled:shadow-none transition flex items-center justify-center gap-2"
-            >
-              {isUploading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Submitting...
-                </>
-              ) : (
-                <>
-                  <Check className="w-5 h-5" />
-                  Submit Exam
-                </>
-              )}
-            </button>
-          )}
+          <button 
+            onClick={handleSubmit}
+            disabled={isUploading || images.length === 0}
+            className="flex-[2] py-4 bg-primary text-white rounded-xl font-bold shadow-lg shadow-primary/20 hover:bg-primary/90 disabled:opacity-50 disabled:shadow-none transition flex items-center justify-center gap-2"
+          >
+            {isUploading ? (
+              <>
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Submitting...
+              </>
+            ) : (
+              <>
+                <Check className="w-5 h-5" />
+                Submit Exam
+              </>
+            )}
+          </button>
         </footer>
 
         {/* Cropping Overlay */}

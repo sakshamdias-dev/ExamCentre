@@ -1,0 +1,5 @@
+{
+  "name": "Examfriendly",
+  "description": "A secure, mobile-responsive proctoring and examination platform for zero-budget EdTech.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation", "display-capture"]
+}

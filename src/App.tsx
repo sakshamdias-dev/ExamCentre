@@ -1,0 +1,4656 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { supabase, Profile, Test, isSupabaseConfigured } from './lib/supabase';
+import { uploadFile, extractFileId, fetchFileAsBlob } from './lib/storage';
+import { cn, formatTime } from './lib/utils';
+import { 
+  Shield, 
+  User, 
+  BookOpen, 
+  Camera, 
+  CameraOff,
+  Mic, 
+  Monitor, 
+  LogOut, 
+  Clock, 
+  AlertTriangle, 
+  CheckCircle,
+  FileText,
+  Send,
+  Wifi,
+  WifiOff,
+  PenTool,
+  Download,
+  Upload,
+  Lock,
+  Menu,
+  X,
+  Cloud,
+  FileCheck,
+  ExternalLink,
+  Bell,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  MessageCircle,
+  Loader2,
+  Pencil,
+  Eraser,
+  Trash2,
+  Type,
+  ArrowLeft,
+  ArrowRight,
+  ShieldAlert,
+  Maximize,
+  Video,
+  Activity,
+  Plus,
+  Search,
+  Calendar,
+  Users,
+  Eye,
+  RefreshCw,
+  Check,
+  Save,
+  Undo,
+  Maximize2,
+  Minimize2
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
+import { Stage, Layer, Line, Text as KonvaText, Label, Tag } from 'react-konva';
+
+import { SubmissionModal } from './components/SubmissionModal';
+
+// --- Utils ---
+
+const getEmbedUrl = (url: string | undefined) => {
+  if (!url) return '';
+  
+  // Upgrade HTTP to HTTPS to avoid mixed content blocking
+  if (url.startsWith('http://')) {
+    url = url.replace('http://', 'https://');
+  }
+
+  // If it's already a relative path to our API, ensure it has type=pdf if it's for PdfViewer
+  if (url.startsWith('/api/storage/file/')) {
+    if (!url.includes('type=pdf')) {
+      const separator = url.includes('?') ? '&' : '?';
+      return `${url}${separator}type=pdf`;
+    }
+    return url;
+  }
+
+  // If it's an absolute URL but points to our API, make it relative to avoid CORS
+  if (url.startsWith('http')) {
+    const apiPathIndex = url.indexOf('/api/storage/file/');
+    if (apiPathIndex !== -1) {
+      const apiPath = url.substring(apiPathIndex);
+      if (!apiPath.includes('type=pdf')) {
+        const separator = apiPath.includes('?') ? '&' : '?';
+        return `${apiPath}${separator}type=pdf`;
+      }
+      return apiPath;
+    }
+  }
+
+  // Support local_ identifiers directly
+  if (url.startsWith('local_')) {
+    return `/api/storage/file/${url}?type=pdf`;
+  }
+
+  // Basic Google Docs preview support (non-Drive file download)
+  if (url.includes('docs.google.com')) {
+    const docsMatch = url.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9_-]+)/);
+    if (docsMatch) {
+      return `https://docs.google.com/${docsMatch[1]}/d/${docsMatch[2]}/preview`;
+    }
+  }
+  
+  return url;
+};
+
+const PdfViewer = ({ url, title, className, style }: { url: string, title?: string, className?: string, style?: any }) => {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    let currentBlobUrl: string | null = null;
+
+    const load = async () => {
+      if (!url) {
+        setLoading(false);
+        return;
+      }
+
+      // If it's already a full external preview link (like docs.google.com), just use it directly
+      if (url.includes('docs.google.com')) {
+        setBlobUrl(url);
+        setLoading(false);
+        return;
+      }
+
+      // If it's a relative URL or points to our API, use it directly
+      if (url.startsWith('/') || url.includes('/api/storage/file/')) {
+        setBlobUrl(url);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      try {
+        // Use relative path for our own API to avoid CORS if it was an absolute URL
+        let fetchUrl = url;
+        if (fetchUrl.startsWith('http')) {
+          const apiIndex = fetchUrl.indexOf('/api/storage/file/');
+          if (apiIndex !== -1) {
+            fetchUrl = fetchUrl.substring(apiIndex);
+            setBlobUrl(fetchUrl);
+            setLoading(false);
+            return;
+          }
+        }
+
+        const response = await fetch(fetchUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        // Check for HTML response (platform security check)
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('text/html')) {
+          const text = await response.text();
+          if (text.includes('<!doctype html>') || text.includes('<html')) {
+            // If we got HTML, it's likely a redirect or platform thing.
+            // In this case, embedding directly might work better if we're in the same context.
+            if (active) {
+              setBlobUrl(url);
+              setLoading(false);
+            }
+            return;
+          }
+        }
+
+        const blob = await response.blob();
+        if (active) {
+          currentBlobUrl = URL.createObjectURL(blob);
+          setBlobUrl(currentBlobUrl);
+        }
+      } catch (err: any) {
+        if (active) {
+          console.error("PDF Load Error:", err);
+          // Fallback to direct URL if fetch fails (might work if server allows framing but not CORS)
+          setBlobUrl(url);
+          // Don't show error immediately, let the iframe try to resolve it
+          setLoading(false);
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    load();
+
+    return () => {
+      active = false;
+      if (currentBlobUrl) {
+        URL.revokeObjectURL(currentBlobUrl);
+      }
+    };
+  }, [url]);
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full bg-gray-50 text-gray-400">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mb-4"></div>
+        <p className="font-bold animate-pulse">Loading Question Paper...</p>
+      </div>
+    );
+  }
+
+  if (error || !blobUrl) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-gray-50">
+        <AlertTriangle className="w-16 h-16 text-orange-500 mb-4" />
+        <p className="text-gray-900 font-bold mb-2 text-xl">Unable to load PDF</p>
+        <p className="text-sm text-gray-500 mb-6 max-w-md">
+          {error === 'TypeError: Failed to fetch' 
+            ? "Network error. This might be due to security restrictions or a connection issue." 
+            : `Error: ${error || 'Unknown error'}`}
+        </p>
+        <div className="flex gap-4">
+          <button 
+            onClick={() => window.location.reload()}
+            className="bg-primary text-white px-6 py-2 rounded-lg font-bold shadow-md hover:bg-primary/90 transition"
+          >
+            Retry
+          </button>
+          <a 
+            href={url} 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="bg-white border border-gray-200 text-gray-600 px-6 py-2 rounded-lg font-bold shadow-sm hover:bg-gray-50 transition flex items-center gap-2"
+          >
+            <ExternalLink className="w-4 h-4" /> Open Directly
+          </a>
+          <a 
+            href={url} 
+            download
+            className="bg-gray-100 text-gray-600 px-6 py-2 rounded-lg font-bold shadow-sm hover:bg-gray-200 transition flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" /> Download PDF
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <iframe 
+      src={blobUrl} 
+      className={className} 
+      style={style} 
+      title={title}
+      // Removing no-referrer as it might trigger some safety blocks in Edge/Safari
+      // sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
+    />
+  );
+};
+
+const getFileViewUrl = (idOrUrl: string, forcePdf: boolean = false) => {
+  if (!idOrUrl) return '';
+  
+  let normalized = idOrUrl;
+  // If it's an absolute URL but points to our API, make it relative to avoid CORS
+  if (normalized.startsWith('http')) {
+    const apiPathIndex = normalized.indexOf('/api/storage/file/');
+    if (apiPathIndex !== -1) {
+      normalized = normalized.substring(apiPathIndex);
+    }
+  }
+
+  // If it's already a full URL (still absolute after check above)
+  if (normalized.startsWith('http')) {
+    return normalized;
+  }
+  
+  // Now handle our proxy URLs (which might be relative now) or IDs
+  if (normalized.includes('/api/storage/file/') || normalized.startsWith('local_') || forcePdf) {
+    let [base, query] = normalized.split('?');
+    
+    // Ensure relative path
+    if (base.startsWith('local_')) {
+      base = `/api/storage/file/${base}`;
+    } else if (!base.startsWith('/')) {
+      base = `/api/storage/file/${base}`;
+    }
+
+    const finalBase = base.endsWith('.pdf') ? base : `${base}.pdf`;
+    const params = new URLSearchParams(query || '');
+    if (forcePdf) params.set('type', 'pdf');
+    const finalQuery = params.toString();
+    return finalQuery ? `${finalBase}?${finalQuery}` : finalBase;
+  }
+  
+  return normalized.startsWith('/') ? normalized : `/api/storage/file/${normalized}`;
+};
+
+const downloadSubmissionAsPdf = async (submission: any, showNotification: (m: string, t?: 'success' | 'error') => void) => {
+  const pageIds = submission.page_ids || [];
+  if (pageIds.length === 0) {
+    if (submission.google_drive_file_id) {
+      window.open(getFileViewUrl(submission.google_drive_file_id, true), '_blank');
+      return;
+    }
+    showNotification("No pages found for this submission.", 'error');
+    return;
+  }
+
+  try {
+    showNotification("Preparing PDF download...");
+    // A4 portrait dimensions: 210 x 297 mm
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
+    const pageWidth = 210;
+    const pageHeight = 297;
+
+    for (let i = 0; i < pageIds.length; i++) {
+      showNotification(`Fetching page ${i + 1} of ${pageIds.length}...`);
+      const blob = await fetchFileAsBlob(pageIds[i]);
+      
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
+      });
+
+      const img = new Image();
+      await new Promise((resolve) => {
+        img.onload = resolve;
+        img.onerror = resolve;
+        img.src = dataUrl;
+      });
+
+      const imgWidth = img.width;
+      const imgHeight = img.height;
+      const imgRatio = imgWidth / imgHeight;
+      const orientation = imgRatio > 1.1 ? 'landscape' : 'portrait';
+
+      if (i === 0) {
+        if (orientation === 'landscape') {
+          doc.deletePage(1);
+          doc.addPage('a4', 'l');
+        }
+      } else {
+        doc.addPage('a4', orientation === 'landscape' ? 'l' : 'p');
+      }
+
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const pageRatio = pageWidth / pageHeight;
+
+      // Use a canvas to normalize the image (handles EXIF orientation in browsers)
+      const canvas = document.createElement('canvas');
+      canvas.width = imgWidth;
+      canvas.height = imgHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0);
+        const normalizedDataUrl = canvas.toDataURL('image/jpeg', 0.9);
+        
+        let finalWidth, finalHeight, x, y;
+
+        if (imgRatio > pageRatio) {
+          finalWidth = pageWidth;
+          finalHeight = pageWidth / imgRatio;
+          x = 0;
+          y = (pageHeight - finalHeight) / 2;
+        } else {
+          finalHeight = pageHeight;
+          finalWidth = pageHeight * imgRatio;
+          x = (pageWidth - finalWidth) / 2;
+          y = 0;
+        }
+
+        doc.addImage(normalizedDataUrl, 'JPEG', x, y, finalWidth, finalHeight, undefined, 'FAST');
+      } else {
+        // Fallback if canvas fails
+        doc.addImage(dataUrl, 'JPEG', 0, 0, pageWidth, pageHeight, undefined, 'FAST');
+      }
+    }
+
+    const fileName = `Submission_${submission.profiles?.full_name || 'Student'}_${Date.now()}.pdf`;
+    doc.save(fileName);
+    showNotification("PDF downloaded successfully!", 'success');
+  } catch (err: any) {
+    console.error("PDF generation error:", err);
+    showNotification("Failed to generate PDF: " + err.message, 'error');
+  }
+};
+
+const StorageImage = ({ fileId, className, alt, crossOrigin }: { fileId: string, className?: string, alt?: string, crossOrigin?: React.ImgHTMLAttributes<HTMLImageElement>['crossOrigin'] }) => {
+  const [src, setSrc] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const driveId = extractFileId(fileId);
+
+  useEffect(() => {
+    if (!driveId) return;
+    
+    const fetchImage = async () => {
+      setLoading(true);
+      try {
+        let apiUrl = driveId;
+        
+        // If it's already a relative path to our API, use it directly
+        if (apiUrl.startsWith('/api/storage/file/')) {
+          setSrc(apiUrl);
+          setLoading(false);
+          return;
+        }
+
+        // If it's a full URL, check if it's our own API and convert to relative to avoid CORS
+        if (apiUrl.startsWith('http')) {
+          const apiPathIndex = apiUrl.indexOf('/api/storage/file/');
+          if (apiPathIndex !== -1) {
+            apiUrl = apiUrl.substring(apiPathIndex);
+            setSrc(apiUrl);
+            setLoading(false);
+            return;
+          }
+          setSrc(apiUrl);
+          setLoading(false);
+          return;
+        }
+
+        // Use backend proxy for just IDs
+        setSrc(`/api/storage/file/${apiUrl}`);
+        setLoading(false);
+      } catch (err) {
+        console.error("Error loading image:", err);
+        setLoading(false);
+      }
+    };
+
+    fetchImage();
+  }, [driveId]);
+
+  if (loading) return <div className={cn(className, "flex items-center justify-center bg-gray-100")}><Loader2 className="animate-spin text-primary" /></div>;
+
+  return <img src={src} className={className} alt={alt} crossOrigin={crossOrigin} />;
+};
+
+// --- Components ---
+
+const Login = ({ onLogin }: { onLogin: (user: any) => void }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [role, setRole] = useState<'student' | 'teacher'>('student');
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    
+    try {
+      if (isSignUp) {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              full_name: fullName,
+              role: role
+            }
+          }
+        });
+
+        if (signUpError) throw signUpError;
+        if (!data.user) throw new Error("Signup failed");
+
+        // Create profile
+        const { error: profileError } = await supabase.from('profiles').insert({
+          id: data.user.id,
+          email,
+          full_name: fullName,
+          role: role
+        });
+
+        if (profileError) {
+          console.error("Profile creation error:", profileError);
+          // Even if profile creation fails, the user is signed up. 
+          // We'll try to proceed or show a warning.
+        }
+
+        onLogin(data.user);
+      } else {
+        const { data, error: authError } = await supabase.auth.signInWithPassword({ email, password });
+        
+        if (authError) {
+          console.error('Auth error:', authError);
+          throw authError;
+        }
+        
+        onLogin(data.user);
+      }
+    } catch (err: any) {
+      console.error('Auth catch error:', err);
+      setError(err.message || "Authentication failed. Please check your credentials.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 border border-gray-100"
+      >
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-primary/10 rounded-full mb-4">
+            <Shield className="w-8 h-8 text-primary" />
+          </div>
+          <h1 className="text-3xl font-bold text-gray-900">Examfriendly</h1>
+          <p className="text-gray-500 mt-2">{isSignUp ? 'Create your account' : 'Secure Proctoring Platform'}</p>
+        </div>
+
+        {error && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-lg flex items-start gap-3 text-red-600 text-sm">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
+            <p>{error}</p>
+          </div>
+        )}
+
+        <form onSubmit={handleAuth} className="space-y-4">
+          {isSignUp && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                <input 
+                  type="text" 
+                  required
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition"
+                  placeholder="John Doe"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">I am a...</label>
+                <select 
+                  value={role}
+                  onChange={(e: any) => setRole(e.target.value)}
+                  className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition"
+                >
+                  <option value="student">Student</option>
+                  <option value="teacher">Teacher</option>
+                </select>
+              </div>
+            </>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+            <input 
+              type="email" 
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition"
+              placeholder="email@example.com"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+            <input 
+              type="password" 
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition"
+              placeholder="••••••••"
+            />
+          </div>
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-primary hover:bg-primary/90 text-white font-bold py-3 rounded-lg transition transform active:scale-95 disabled:opacity-50 mt-4"
+          >
+            {loading ? 'Processing...' : (isSignUp ? 'Sign Up' : 'Sign In')}
+          </button>
+        </form>
+
+        <div className="mt-6 text-center">
+          <button 
+            onClick={() => setIsSignUp(!isSignUp)}
+            className="text-sm text-primary hover:underline font-medium"
+          >
+            {isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
+          </button>
+        </div>
+
+        <div className="mt-6 text-center text-xs text-gray-400">
+          <p>Only authorized users can access the platform.</p>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+// --- Student View ---
+
+const StudentExam = ({ test, user, onFinish, showNotification }: { test: Test, user: any, onFinish: () => void, showNotification: (m: string, t?: 'success' | 'error') => void }) => {
+  const [timeLeft, setTimeLeft] = useState(() => {
+    const end = new Date(test.end_time).getTime();
+    const now = new Date().getTime();
+    return Math.max(0, Math.floor((end - now) / 1000));
+  });
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [proctorStatus, setProctorStatus] = useState({ camera: false, mic: false, screen: false });
+  const [tabSwitches, setTabSwitches] = useState(0);
+  const [scannedImages, setScannedImages] = useState<string[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [lowDataMode, setLowDataMode] = useState(false);
+  const [offlineBuffer, setOfflineBuffer] = useState<{logs: any[], chats: any[]}>({ logs: [], chats: [] });
+  const [showSubmissionModal, setShowSubmissionModal] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [activeWarning, setActiveWarning] = useState<any | null>(null);
+  const [isPaused, setIsPaused] = useState(test.is_paused);
+  const [showQuestionPaper, setShowQuestionPaper] = useState(false);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [isMobile] = useState(/iPhone|iPad|iPod|Android/i.test(navigator.userAgent));
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [examChats, setExamChats] = useState<any[]>([]);
+  const [showChat, setShowChat] = useState(false);
+  const [chatMessage, setChatMessage] = useState('');
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const screenVideoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel(`warnings_${user.id}`)
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'notifications',
+        filter: `user_id=eq.${user.id}`
+      }, (payload) => {
+        if (payload.new.type === 'warning') {
+          console.log('Warning received:', payload.new);
+          setActiveWarning(payload.new);
+        } else if (payload.new.type === 'audio_request') {
+          console.log('Audio request received');
+          setIsRecordingAudio(true);
+          handleAudioRequest().finally(() => {
+            setTimeout(() => setIsRecordingAudio(false), 5000);
+          });
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user.id]);
+
+  useEffect(() => {
+    const fetchChats = async () => {
+      const { data } = await supabase
+        .from('exam_chats')
+        .select('*')
+        .eq('test_id', test.id)
+        .eq('student_id', user.id)
+        .order('created_at', { ascending: true });
+      if (data) setExamChats(data);
+    };
+    fetchChats();
+
+    const channel = supabase
+      .channel(`exam_chats_${user.id}`)
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'exam_chats',
+        filter: `student_id=eq.${user.id}`
+      }, (payload) => {
+        if (payload.new.test_id === test.id) {
+          setExamChats(prev => [...prev, payload.new]);
+          if (!showChat && payload.new.sender_id !== user.id) {
+            setUnreadCount(prev => prev + 1);
+          }
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user.id, test.id, showChat]);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [examChats, showChat]);
+
+  const sendChatMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatMessage.trim()) return;
+    const msg = chatMessage;
+    setChatMessage('');
+    const { error } = await supabase.from('exam_chats').insert({
+      test_id: test.id,
+      student_id: user.id,
+      sender_id: user.id,
+      message: msg
+    });
+    if (error) {
+      console.error('Error sending chat message:', error);
+      setChatMessage(msg);
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isFull = !!document.fullscreenElement;
+      setIsFullscreen(isFull);
+      if (!isFull && !isPaused && showQuestionPaper) {
+        const log = {
+          test_id: test.id,
+          user_id: user.id,
+          event_type: 'fullscreen_exit',
+          details: `Fullscreen exit detected at ${new Date().toISOString()}`
+        };
+        if (navigator.onLine) {
+          supabase.from('proctoring_logs').insert(log).then(null, err => console.error('Fullscreen exit log rejection:', err));
+        } else {
+          setOfflineBuffer(prev => ({ ...prev, logs: [...prev.logs, log] }));
+        }
+        alert("Fullscreen exit detected. This is a violation. Please return to fullscreen.");
+      }
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, [isPaused, showQuestionPaper]);
+
+  useEffect(() => {
+    if (!cameraStream) return;
+
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const source = audioContext.createMediaStreamSource(cameraStream);
+    const analyzer = audioContext.createAnalyser();
+    analyzer.fftSize = 256;
+    source.connect(analyzer);
+
+    const bufferLength = analyzer.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+
+    let lastViolationTime = 0;
+
+    const checkAudio = () => {
+      analyzer.getByteFrequencyData(dataArray);
+      let sum = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        sum += dataArray[i];
+      }
+      const average = sum / bufferLength;
+      setAudioLevel(average);
+
+      // Threshold for noise violation
+      if (average > 50 && !isPaused && showQuestionPaper) {
+        const now = Date.now();
+        if (now - lastViolationTime > 10000) { // Log at most every 10 seconds
+          lastViolationTime = now;
+          const log = {
+            test_id: test.id,
+            user_id: user.id,
+            event_type: 'high_noise',
+            details: `High noise level detected (${Math.round(average)}) at ${new Date().toISOString()}`
+          };
+          if (navigator.onLine) {
+          supabase.from('proctoring_logs').insert(log).then(null, err => console.error('High noise log rejection:', err));
+          } else {
+            setOfflineBuffer(prev => ({ ...prev, logs: [...prev.logs, log] }));
+          }
+        }
+      }
+      requestAnimationFrame(checkAudio);
+    };
+
+    checkAudio();
+
+    return () => {
+      audioContext.close();
+    };
+  }, [cameraStream, isPaused, showQuestionPaper]);
+
+  const handleAudioRequest = async () => {
+    if (!cameraStream) return;
+    
+    try {
+      // Create an audio-only stream from the camera stream's audio tracks
+      const audioOnlyStream = new MediaStream(cameraStream.getAudioTracks());
+      const mediaRecorder = new MediaRecorder(audioOnlyStream);
+      const chunks: Blob[] = [];
+      
+      mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = async () => {
+          const base64Audio = reader.result as string;
+          await supabase.from('proctoring_logs').insert({
+            test_id: test.id,
+            user_id: user.id,
+            event_type: 'audio_sample',
+            details: 'Audio sample recorded on request',
+            audio_data: base64Audio
+          });
+        };
+      };
+      
+      mediaRecorder.start();
+      setTimeout(() => mediaRecorder.stop(), 5000);
+    } catch (err) {
+      console.error("Error recording audio sample:", err);
+    }
+  };
+
+  const requestFullscreen = () => {
+    const elem = document.documentElement;
+    if (elem.requestFullscreen) {
+      elem.requestFullscreen().catch(err => {
+        console.error(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+      });
+    }
+  };
+
+  const audioLevelRef = useRef(0);
+  const proctorStatusRef = useRef(proctorStatus);
+
+  useEffect(() => {
+    proctorStatusRef.current = proctorStatus;
+  }, [proctorStatus]);
+
+  useEffect(() => {
+    audioLevelRef.current = audioLevel;
+  }, [audioLevel]);
+
+  useEffect(() => {
+    if (cameraStream && videoRef.current) {
+      console.log('Attaching stream to video element');
+      videoRef.current.srcObject = cameraStream;
+      const playPromise = videoRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(error => {
+          console.error("Auto-play was prevented:", error);
+        });
+      }
+    }
+  }, [cameraStream]);
+
+  useEffect(() => {
+    // Initial session upsert to show student as "in room"
+    if (user) {
+      console.log('Initial session upsert for user:', user.id);
+      supabase.from('live_sessions').upsert({
+        test_id: test.id,
+        user_id: user.id,
+        is_active: true,
+        last_seen: new Date().toISOString()
+      }, { onConflict: 'test_id,user_id' }).then(({ error }) => {
+        if (error) console.error('Initial session upsert error:', error);
+      }, err => console.error('Initial session upsert rejection:', err));
+    }
+
+    // Real-time listener for test updates (Pause/Modify timing)
+    const channel = supabase
+      .channel(`test_${test.id}`)
+      .on('postgres_changes', { 
+        event: 'UPDATE', 
+        schema: 'public', 
+        table: 'tests', 
+        filter: `id=eq.${test.id}` 
+      }, (payload) => {
+        const updatedTest = payload.new as Test;
+        setIsPaused(updatedTest.is_paused);
+        
+        // Recalculate time left
+        const newEnd = new Date(updatedTest.end_time).getTime();
+        const now = new Date().getTime();
+        setTimeLeft(Math.max(0, Math.floor((newEnd - now) / 1000)));
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [test.id]);
+
+  useEffect(() => {
+    // Sync offline data when coming back online
+    if (isOnline && (offlineBuffer.logs.length > 0 || offlineBuffer.chats.length > 0)) {
+      syncOfflineData();
+    }
+  }, [isOnline]);
+
+  const syncOfflineData = async () => {
+    console.log('Syncing offline data...');
+    if (offlineBuffer.logs.length > 0) {
+      const { error } = await supabase.from('proctoring_logs').insert(offlineBuffer.logs);
+      if (!error) setOfflineBuffer(prev => ({ ...prev, logs: [] }));
+    }
+  };
+
+  useEffect(() => {
+    if (screenStream && screenVideoRef.current) {
+      screenVideoRef.current.srcObject = screenStream;
+      screenVideoRef.current.play().catch(e => console.error("Error playing screen stream:", e));
+    }
+  }, [screenStream]);
+
+  useEffect(() => {
+    // Snapshot interval for Proctoring
+    console.log('Starting snapshot/heartbeat interval for test:', test.id);
+    const snapshotInterval = setInterval(() => {
+      if (isPaused) return;
+
+      const currentAudioLevel = audioLevelRef.current;
+      const currentProctorStatus = proctorStatusRef.current;
+
+      // Camera Snapshot
+      if (videoRef.current && currentProctorStatus.camera) {
+        const canvas = document.createElement('canvas');
+        const scale = lowDataMode ? 0.5 : 1;
+        canvas.width = videoRef.current.videoWidth * scale || 320;
+        canvas.height = videoRef.current.videoHeight * scale || 240;
+        canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+        const imageData = canvas.toDataURL('image/jpeg', lowDataMode ? 0.3 : 0.6);
+        supabase.from('live_snapshots').insert({
+          test_id: test.id,
+          user_id: user.id,
+          image_data: imageData,
+          type: 'camera'
+        }).then(({ error }) => {
+          if (error) console.error('Error sending camera snapshot:', error);
+        }, err => console.error('Camera snapshot rejection:', err));
+      }
+
+      // Screen Snapshot
+      if (screenVideoRef.current && currentProctorStatus.screen) {
+        const canvas = document.createElement('canvas');
+        const scale = lowDataMode ? 0.3 : 0.6;
+        canvas.width = screenVideoRef.current.videoWidth * scale || 640;
+        canvas.height = screenVideoRef.current.videoHeight * scale || 480;
+        canvas.getContext('2d')?.drawImage(screenVideoRef.current, 0, 0, canvas.width, canvas.height);
+        const imageData = canvas.toDataURL('image/jpeg', lowDataMode ? 0.2 : 0.4);
+        supabase.from('live_snapshots').insert({
+          test_id: test.id,
+          user_id: user.id,
+          image_data: imageData,
+          type: 'screen'
+        }).then(({ error }) => {
+          if (error) console.error('Error sending screen snapshot:', error);
+        }, err => console.error('Screen snapshot rejection:', err));
+      }
+
+      // Heartbeat
+      console.log('Sending heartbeat for user:', user.id);
+      supabase.from('live_sessions').upsert({
+        test_id: test.id,
+        user_id: user.id,
+        is_active: true,
+        last_seen: new Date().toISOString(),
+        audio_level: Math.round(currentAudioLevel)
+      }, { onConflict: 'test_id,user_id' }).then(({ error }) => {
+        if (error) console.error('Heartbeat error:', error);
+      }, err => console.error('Heartbeat rejection:', err));
+
+    }, lowDataMode ? 15000 : 5000);
+
+    const timer = setInterval(() => {
+      if (isPaused) return;
+      
+      const end = new Date(test.end_time).getTime();
+      const now = new Date().getTime();
+      const remaining = Math.max(0, Math.floor((end - now) / 1000));
+      
+      setTimeLeft(remaining);
+      
+      if (remaining <= 0) {
+        clearInterval(timer);
+        showNotification("Time's up! You have been removed from the exam room.", 'error');
+        // Mark session as inactive in background
+        supabase.from('live_sessions')
+          .update({ is_active: false })
+          .eq('user_id', user.id)
+          .then(({ error }) => {
+            if (error) console.error('Error marking session inactive:', error);
+          }, err => console.error('Session inactive update rejection:', err));
+        onFinish();
+      }
+    }, 1000);
+
+    const handleVisibility = () => {
+      if (document.hidden && !isPaused) {
+        setTabSwitches(s => s + 1);
+        const log = {
+          test_id: test.id,
+          user_id: user.id,
+          event_type: 'tab_switch',
+          details: `Tab switch detected at ${new Date().toISOString()}`
+        };
+        
+        if (navigator.onLine) {
+          supabase.from('proctoring_logs').insert(log).then(null, err => console.error('Tab switch log rejection:', err));
+        } else {
+          setOfflineBuffer(prev => ({ ...prev, logs: [...prev.logs, log] }));
+        }
+      }
+    };
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      clearInterval(timer);
+      clearInterval(snapshotInterval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    };
+  }, [lowDataMode, isPaused]);
+
+  const startProctoring = async () => {
+    try {
+      console.log('Requesting camera and microphone...');
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { width: { ideal: 640 }, height: { ideal: 480 } }, 
+        audio: true 
+      });
+      
+      if (stream.getVideoTracks().length === 0) {
+        throw new Error("No video tracks found in stream. Please check your camera connection.");
+      }
+      
+      streamRef.current = stream;
+      setCameraStream(stream);
+      setProctorStatus(prev => ({ ...prev, camera: true, mic: true }));
+
+      // Listen for camera/mic stop
+      stream.getVideoTracks()[0].onended = () => {
+        setProctorStatus(prev => ({ ...prev, camera: false }));
+      };
+      if (stream.getAudioTracks().length > 0) {
+        stream.getAudioTracks()[0].onended = () => {
+          setProctorStatus(prev => ({ ...prev, mic: false }));
+        };
+      }
+
+      // Screen share is required for non-mobile or if supported on mobile
+      if (navigator.mediaDevices.getDisplayMedia) {
+        try {
+          console.log('Requesting screen share...');
+          const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+            video: true,
+            audio: false // Explicitly disable system audio capture
+          });
+          setScreenStream(screenStream);
+          setProctorStatus(prev => ({ ...prev, screen: true }));
+          screenStream.getVideoTracks()[0].onended = () => {
+            alert("Screen sharing stopped. This is a violation. Please restart proctoring.");
+            setProctorStatus(prev => ({ ...prev, screen: false }));
+          };
+        } catch (screenErr) {
+          if (isMobile) {
+            console.warn("Screen share failed on mobile, marking as true to allow proceed if not possible:", screenErr);
+            setProctorStatus(prev => ({ ...prev, screen: true }));
+          } else {
+            throw new Error("Screen sharing is required to start the exam.");
+          }
+        }
+      } else {
+        // Not supported (likely mobile)
+        setProctorStatus(prev => ({ ...prev, screen: true }));
+      }
+
+      // Create live session record
+      const { data: userData } = await supabase.auth.getUser();
+      if (userData.user) {
+        const { error } = await supabase.from('live_sessions').upsert({
+          test_id: test.id,
+          user_id: userData.user.id,
+          is_active: true,
+          last_seen: new Date().toISOString()
+        }, { onConflict: 'test_id,user_id' });
+        if (error) console.error('Error creating live session:', error);
+      }
+      
+    } catch (err) {
+      console.error("Proctoring error:", err);
+      alert("Proctoring requirements not met. Please ensure you allow Camera, Microphone, and Screen Sharing.");
+    }
+  };
+
+  const handleCapture = () => {
+    const canvas = document.createElement('canvas');
+    if (videoRef.current) {
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0);
+      setScannedImages(prev => [...prev, canvas.toDataURL('image/jpeg')]);
+    }
+  };
+
+  useEffect(() => {
+    if (showQuestionPaper && (!proctorStatus.camera || !proctorStatus.mic || !proctorStatus.screen)) {
+      setShowQuestionPaper(false);
+      alert("Proctoring interrupted. Question paper closed.");
+    }
+  }, [proctorStatus, showQuestionPaper]);
+
+  const captureCurrentFrame = () => {
+    const canvas = document.createElement('canvas');
+    if (videoRef.current) {
+      canvas.width = videoRef.current.videoWidth;
+      canvas.height = videoRef.current.videoHeight;
+      canvas.getContext('2d')?.drawImage(videoRef.current, 0, 0);
+      return canvas.toDataURL('image/jpeg');
+    }
+    return '';
+  };
+
+  const timerColor = timeLeft < 300 ? 'timer-critical' : timeLeft < 900 ? 'timer-warning' : 'text-gray-700';
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col relative">
+      {/* Hidden video elements for proctoring captures */}
+      <video ref={videoRef} className="hidden" playsInline muted />
+      <video ref={screenVideoRef} className="hidden" playsInline muted />
+
+      {activeWarning && (
+        <div className="fixed inset-0 bg-red-600/90 z-[400] flex items-center justify-center p-6 text-center">
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-white p-8 rounded-3xl shadow-2xl max-w-md border-4 border-red-500"
+          >
+            <ShieldAlert className="w-20 h-20 text-red-600 mx-auto mb-6 animate-bounce" />
+            <h2 className="text-3xl font-black text-red-600 mb-2 uppercase tracking-tighter">PROCTORING WARNING</h2>
+            <p className="text-gray-900 font-bold text-lg mb-6 leading-tight">{activeWarning.message}</p>
+            <button 
+              onClick={() => setActiveWarning(null)}
+              className="w-full bg-red-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:bg-red-700 transition"
+            >
+              I UNDERSTAND
+            </button>
+          </motion.div>
+        </div>
+      )}
+
+      {isRecordingAudio && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[400] bg-blue-600 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-3 animate-bounce">
+          <Mic className="w-5 h-5 animate-pulse" />
+          <span className="font-bold text-sm uppercase tracking-wider">System Audio Check in Progress...</span>
+        </div>
+      )}
+
+      {showQuestionPaper && !isFullscreen && !isMobile && (
+        <div className="fixed inset-0 bg-black/90 z-[300] flex items-center justify-center p-6 text-center">
+          <div className="max-w-md">
+            <Maximize className="w-20 h-20 text-primary mx-auto mb-6 animate-pulse" />
+            <h2 className="text-3xl font-black text-white mb-4">FULLSCREEN REQUIRED</h2>
+            <p className="text-gray-400 mb-8">To prevent cheating, this exam must be taken in fullscreen mode. Your actions are being logged.</p>
+            <button 
+              onClick={requestFullscreen}
+              className="w-full bg-primary text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:bg-primary/90 transition"
+            >
+              Enter Fullscreen Mode
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isPaused && (
+        <div className="fixed inset-0 bg-black/80 z-[200] flex items-center justify-center text-center p-6">
+          <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }}>
+            <AlertTriangle className="w-20 h-20 text-orange-500 mx-auto mb-6" />
+            <h2 className="text-4xl font-black text-white mb-2">EXAM PAUSED</h2>
+            <p className="text-gray-400 max-w-md mx-auto">The invigilator has temporarily paused the exam. Your timer is stopped. Please wait for the resume signal.</p>
+          </motion.div>
+        </div>
+      )}
+
+      {showQuestionPaper && (
+        <div className="fixed inset-0 bg-white z-[150] flex flex-col">
+          <header className="p-4 border-b flex justify-between items-center bg-gray-900 text-white shadow-xl">
+            <div className="flex items-center gap-4">
+              <button onClick={() => setShowQuestionPaper(false)} className="p-2 hover:bg-white/10 rounded-full transition">
+                <ArrowLeft className="w-6 h-6" />
+              </button>
+              <h3 className="font-bold text-lg">Question Paper: {test.title}</h3>
+            </div>
+            <div className="flex gap-2">
+              <a 
+                href={getEmbedUrl(test.question_paper_url)} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition"
+              >
+                <ExternalLink className="w-4 h-4" /> Open in New Tab
+              </a>
+              <button 
+                onClick={() => setShowQuestionPaper(false)} 
+                className="bg-primary text-white px-6 py-2 rounded-lg font-bold shadow-lg hover:bg-primary/90 transition"
+              >
+                Close Paper
+              </button>
+            </div>
+          </header>
+          <div className="flex-1 p-0 md:p-8 overflow-auto flex justify-center bg-gray-100">
+            <div className="max-w-5xl w-full bg-white shadow-2xl min-h-full border flex flex-col">
+              {test.question_paper_url ? (
+                <PdfViewer 
+                  url={getEmbedUrl(test.question_paper_url)} 
+                  className="w-full flex-1 border-0" 
+                  title="Question Paper"
+                  style={{ minHeight: isMobile ? '80vh' : 'auto' }}
+                />
+              ) : (
+                <div className="text-center py-20 flex-1 flex flex-col items-center justify-center">
+                  <FileText className="w-20 h-20 text-gray-200 mb-4" />
+                  <p className="text-gray-400 font-bold">No Question Paper available</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chat Box */}
+      <div className={cn(
+        "fixed bottom-6 right-6 z-[250] flex flex-col items-end gap-4 transition-all duration-300",
+        showChat ? "w-80 h-[450px]" : "w-14 h-14"
+      )}>
+        {showChat && (
+          <motion.div 
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            className="bg-white rounded-2xl shadow-2xl border border-gray-200 flex-1 w-full flex flex-col overflow-hidden"
+          >
+            <div className="bg-primary p-4 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <MessageCircle className="w-5 h-5" />
+                <span className="font-bold text-sm">Ask Doubt (Invigilator)</span>
+              </div>
+              <button onClick={() => setShowChat(false)} className="hover:bg-white/20 p-1 rounded transition">
+                <ChevronDown className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50">
+              {examChats.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-gray-400 text-center p-4">
+                  <MessageCircle className="w-10 h-10 mb-2 opacity-20" />
+                  <p className="text-xs">Have a doubt? Send a message to the invigilator.</p>
+                </div>
+              ) : (
+                examChats.map((chat, i) => (
+                  <div key={i} className={cn(
+                    "flex flex-col max-w-[85%]",
+                    chat.sender_id === user.id ? "ml-auto items-end" : "mr-auto items-start"
+                  )}>
+                    <div className={cn(
+                      "px-3 py-2 rounded-2xl text-sm shadow-sm",
+                      chat.sender_id === user.id 
+                        ? "bg-primary text-white rounded-tr-none" 
+                        : "bg-white text-gray-800 border border-gray-100 rounded-tl-none"
+                    )}>
+                      {chat.message}
+                    </div>
+                    <span className="text-[8px] text-gray-400 mt-1">
+                      {new Date(chat.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                ))
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <form onSubmit={sendChatMessage} className="p-3 border-t bg-white flex gap-2">
+              <input 
+                type="text"
+                value={chatMessage}
+                onChange={(e) => setChatMessage(e.target.value)}
+                placeholder="Type your doubt..."
+                className="flex-1 bg-gray-100 border-none rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-primary outline-none"
+              />
+              <button 
+                type="submit"
+                disabled={!chatMessage.trim()}
+                className="bg-primary text-white p-2 rounded-xl hover:bg-primary/90 transition disabled:opacity-50"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </form>
+          </motion.div>
+        )}
+
+        <button 
+          onClick={() => {
+            setShowChat(!showChat);
+            setUnreadCount(0);
+          }}
+          className={cn(
+            "w-14 h-14 rounded-full shadow-2xl flex items-center justify-center transition-all duration-300 relative",
+            showChat ? "bg-gray-100 text-gray-600 rotate-180" : "bg-primary text-white hover:scale-110"
+          )}
+        >
+          {showChat ? <ChevronDown className="w-6 h-6" /> : <MessageCircle className="w-6 h-6" />}
+          {!showChat && unreadCount > 0 && (
+            <div className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white animate-bounce">
+              {unreadCount}
+            </div>
+          )}
+        </button>
+      </div>
+
+      {/* Proctoring Status Bar */}
+      <div className="bg-gray-900 text-white px-4 py-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest border-b border-white/10 shrink-0">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2">
+            <div className={cn("w-2 h-2 rounded-full", proctorStatus.camera ? "bg-green-500" : "bg-red-500 animate-pulse")} />
+            CAMERA: {proctorStatus.camera ? 'ACTIVE' : 'OFF'}
+          </div>
+          <div className="flex items-center gap-2">
+            <div className={cn("w-2 h-2 rounded-full", proctorStatus.mic ? "bg-green-500" : "bg-red-500 animate-pulse")} />
+            MIC: {proctorStatus.mic ? 'ACTIVE' : 'OFF'}
+          </div>
+          <div className="flex items-center gap-2">
+            <div className={cn("w-2 h-2 rounded-full", proctorStatus.screen ? "bg-green-500" : "bg-red-500 animate-pulse")} />
+            SCREEN: {proctorStatus.screen ? 'ACTIVE' : 'OFF'}
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
+              <motion.div 
+                animate={{ width: `${Math.min(100, audioLevel * 2)}%` }}
+                className={cn("h-full", audioLevel > 50 ? "bg-red-500" : "bg-green-500")}
+              />
+            </div>
+            AUDIO LEVEL
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className={cn("w-2 h-2 rounded-full", isOnline ? "bg-green-500" : "bg-red-500")} />
+            {isOnline ? 'ONLINE' : 'OFFLINE'}
+          </div>
+          {offlineBuffer.logs.length > 0 && (
+            <div className="text-orange-500 animate-pulse">
+              {offlineBuffer.logs.length} PENDING LOGS
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Header */}
+      <header className="bg-white border-b px-6 py-4 flex items-center justify-between sticky top-0 z-10">
+        <div className="flex items-center gap-3">
+          <BookOpen className="text-primary w-6 h-6" />
+          <h2 className="font-bold text-lg truncate max-w-[200px]">{test.title}</h2>
+        </div>
+        <div className={cn("flex items-center gap-2 text-xl font-mono", timerColor)}>
+          <Clock className="w-5 h-5" />
+          {formatTime(timeLeft)}
+        </div>
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={() => {
+              if (!proctorStatus.camera || !proctorStatus.mic || !proctorStatus.screen) {
+                alert("Please enable Camera, Microphone, and Screen Sharing first to view the paper.");
+                return;
+              }
+              setShowQuestionPaper(true);
+            }}
+            className="text-primary font-bold text-sm flex items-center gap-1 hover:underline"
+          >
+            <FileText className="w-4 h-4" /> View Paper
+          </button>
+          {isOnline ? <Wifi className="text-green-500 w-5 h-5" /> : <WifiOff className="text-red-500 w-5 h-5" />}
+        </div>
+      </header>
+
+      <main className="flex-1 p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Main Content */}
+        <div className="lg:col-span-2 space-y-6">
+          {!proctorStatus.camera ? (
+            <div className="bg-white rounded-xl p-12 text-center border-2 border-dashed border-gray-200">
+              <Shield className="w-16 h-16 text-primary mx-auto mb-4" />
+              <h3 className="text-xl font-bold mb-2">Hardware Gate</h3>
+              <p className="text-gray-500 mb-6">You must enable Camera, Microphone, and Screen Sharing to start the exam.</p>
+              <button 
+                onClick={startProctoring}
+                className="bg-primary text-white px-8 py-3 rounded-lg font-bold hover:bg-primary/90 transition"
+              >
+                Enable Hardware & Start
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+                <h3 className="font-bold mb-4 flex items-center gap-2">
+                  <FileText className="text-primary" /> Exam Instructions
+                </h3>
+                <p className="text-gray-600 leading-relaxed">{test.description}</p>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                {scannedImages.map((img, i) => (
+                  <div key={i} className="relative group aspect-[3/4] bg-gray-200 rounded-lg overflow-hidden border">
+                    <img src={img} alt={`Page ${i+1}`} className="w-full h-full object-cover" />
+                    <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition">
+                      <button 
+                        onClick={() => setScannedImages(prev => prev.filter((_, idx) => idx !== i))}
+                        className="bg-red-500 text-white p-1 rounded-full"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                      {i > 0 && (
+                        <button 
+                          onClick={() => {
+                            const newImages = [...scannedImages];
+                            [newImages[i], newImages[i-1]] = [newImages[i-1], newImages[i]];
+                            setScannedImages(newImages);
+                          }}
+                          className="bg-primary text-white p-1 rounded-full"
+                        >
+                          <Menu className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                    <div className="absolute bottom-2 left-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
+                      Page {i+1}
+                    </div>
+                  </div>
+                ))}
+                <button 
+                  onClick={handleCapture}
+                  className="aspect-[3/4] border-2 border-dashed border-gray-300 rounded-lg flex flex-col items-center justify-center text-gray-400 hover:border-primary hover:text-primary transition"
+                >
+                  <Camera className="w-8 h-8 mb-2" />
+                  <span className="text-sm font-medium">Capture Page</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Sidebar */}
+        <div className="space-y-6">
+          <div className="bg-black rounded-xl overflow-hidden aspect-video relative shadow-lg min-h-[180px] flex items-center justify-center border-2 border-gray-800">
+            {!cameraStream && (
+              <div className="text-center p-4 z-20">
+                <CameraOff className="w-8 h-8 text-gray-600 mx-auto mb-2 animate-pulse" />
+                <p className="text-[10px] text-gray-500 uppercase font-bold tracking-widest">Awaiting Camera Feed...</p>
+              </div>
+            )}
+            <video 
+              ref={videoRef} 
+              autoPlay 
+              muted 
+              playsInline 
+              className={cn(
+                "absolute inset-0 w-full h-full object-cover transition-opacity duration-700",
+                cameraStream ? "opacity-100" : "opacity-0"
+              )} 
+              onLoadedMetadata={() => {
+                console.log('Video metadata loaded, attempting play');
+                videoRef.current?.play().catch(e => console.error('Play failed on metadata load:', e));
+              }}
+            />
+            <div className="absolute top-2 left-2 z-30 flex gap-2">
+              <button 
+                onClick={() => {
+                  if (streamRef.current && videoRef.current) {
+                    console.log('Manually refreshing video feed');
+                    videoRef.current.srcObject = streamRef.current;
+                    videoRef.current.play().catch(e => console.error('Manual play failed:', e));
+                  }
+                }}
+                className="bg-black/50 text-white p-1.5 rounded-lg hover:bg-black/70 transition flex items-center gap-1"
+                title="Refresh Feed"
+              >
+                <Wifi className="w-3 h-3" />
+                <span className="text-[8px] font-bold uppercase tracking-tighter">Refresh</span>
+              </button>
+            </div>
+            <div className="absolute top-2 right-2 z-30">
+              <div className={cn(
+                "w-2 h-2 rounded-full",
+                cameraStream ? "bg-green-500 animate-pulse" : "bg-red-500"
+              )} />
+            </div>
+            <div className="absolute bottom-2 left-2 flex gap-2 z-30">
+              <span className="bg-green-500 w-2 h-2 rounded-full animate-pulse" />
+              <span className="text-[10px] text-white font-mono">LIVE PROCTORING</span>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+            <h4 className="font-bold mb-4">Security Status</h4>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-500">Tab Switches</span>
+                <span className={cn("font-bold", tabSwitches > 0 ? "text-red-500" : "text-green-500")}>{tabSwitches}</span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-500">Camera</span>
+                {proctorStatus.camera ? <CheckCircle className="text-green-500 w-4 h-4" /> : <AlertTriangle className="text-red-500 w-4 h-4" />}
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-500">Microphone</span>
+                {proctorStatus.mic ? <CheckCircle className="text-green-500 w-4 h-4" /> : <AlertTriangle className="text-red-500 w-4 h-4" />}
+              </div>
+            </div>
+          </div>
+
+          <button 
+            onClick={() => setShowSubmissionModal(true)}
+            className="w-full bg-primary text-white font-bold py-4 rounded-xl shadow-lg hover:bg-primary/90 transition flex items-center justify-center gap-2"
+          >
+            <Send className="w-5 h-5" /> Submit Exam
+          </button>
+        </div>
+      </main>
+
+      {showSubmissionModal && (
+        <SubmissionModal 
+          test={test}
+          user={user}
+          initialImages={scannedImages}
+          onClose={() => setShowSubmissionModal(false)}
+          onSuccess={() => {
+            setShowSubmissionModal(false);
+            onFinish();
+          }}
+        />
+      )}
+    </div>
+  );
+};
+
+// --- Grading View ---
+
+const GradingView = ({ submission, onBack, showNotification }: { submission: any, onBack: () => void, showNotification: (m: string, t?: 'success' | 'error') => void }) => {
+  const stageRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [currentPage, setCurrentPage] = useState(0);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  
+  // inkData and textComments are now objects keyed by page index
+  const [inkData, setInkData] = useState<{[key: number]: any[]}>(() => {
+    const raw = submission.grade_data?.ink || {};
+    const normalized: {[key: number]: any[]} = {};
+    Object.keys(raw).forEach(key => {
+      const idx = parseInt(key);
+      normalized[idx] = (raw[key] || []).map((stroke: any) => {
+        if (!stroke.points) return { ...stroke, points: [] };
+        let flat: number[] = [];
+        if (typeof stroke.points[0] === 'number') {
+          flat = stroke.points;
+        } else {
+          stroke.points.forEach((p: any) => {
+            if (p && typeof p.x === 'number' && typeof p.y === 'number') {
+              flat.push(p.x, p.y);
+            }
+          });
+        }
+        return { ...stroke, points: flat.filter(v => typeof v === 'number' && Number.isFinite(v)) };
+      });
+    });
+    return normalized;
+  });
+  const [textComments, setTextComments] = useState<{[key: number]: any[]}>(submission.grade_data?.comments || {});
+  
+  const [marks, setMarks] = useState(submission.marks_obtained || 0);
+  const [remarks, setRemarks] = useState(submission.teacher_remarks || '');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isReturning, setIsReturning] = useState(false);
+  const [activeTool, setActiveTool] = useState<'pen' | 'eraser' | 'text'>('pen');
+  const [correctedFile, setCorrectedFile] = useState<File | null>(null);
+  const [isUploadingCorrected, setIsUploadingCorrected] = useState(false);
+  const [correctedFileId, setCorrectedFileId] = useState<string | null>(submission.corrected_file_id || null);
+
+  const pageIds = submission.page_ids || [];
+  const totalPages = pageIds.length;
+
+  useEffect(() => {
+    const resize = () => {
+      if (containerRef.current) {
+        setStageSize({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight
+        });
+      }
+    };
+
+    window.addEventListener('resize', resize);
+    resize();
+    // Initial resize might need a small delay for container to be ready
+    const timer = setTimeout(resize, 100);
+    return () => {
+      window.removeEventListener('resize', resize);
+      clearTimeout(timer);
+    };
+  }, []);
+
+  const handleMouseDown = (e: any) => {
+    const stage = e.target.getStage();
+    const pos = stage.getPointerPosition();
+    if (!pos || !stageSize.width || !stageSize.height) return;
+
+    const normalizedPos = {
+      x: pos.x / stageSize.width,
+      y: pos.y / stageSize.height
+    };
+
+    if (!Number.isFinite(normalizedPos.x) || !Number.isFinite(normalizedPos.y)) return;
+
+    if (activeTool === 'eraser') {
+      eraseAt(normalizedPos);
+      setIsDrawing(true);
+      return;
+    }
+
+    if (activeTool === 'text') {
+      const text = prompt("Enter comment:");
+      if (text) {
+        setTextComments(prev => {
+          const current = prev[currentPage] || [];
+          return { ...prev, [currentPage]: [...current, { text, x: normalizedPos.x, y: normalizedPos.y }] };
+        });
+      }
+      return;
+    }
+
+    setIsDrawing(true);
+    setInkData(prev => {
+      const current = prev[currentPage] || [];
+      return { ...prev, [currentPage]: [...current, { points: [normalizedPos.x, normalizedPos.y] }] };
+    });
+  };
+
+  const handleMouseMove = (e: any) => {
+    if (!isDrawing) return;
+    const stage = e.target.getStage();
+    const pos = stage.getPointerPosition();
+    if (!pos || !stageSize.width || !stageSize.height) return;
+
+    const normalizedPos = {
+      x: pos.x / stageSize.width,
+      y: pos.y / stageSize.height
+    };
+
+    if (!Number.isFinite(normalizedPos.x) || !Number.isFinite(normalizedPos.y)) return;
+
+    if (activeTool === 'eraser') {
+      eraseAt(normalizedPos);
+      return;
+    }
+
+    if (activeTool === 'text') return;
+
+    setInkData(prev => {
+      const current = [...(prev[currentPage] || [])];
+      if (current.length === 0) return prev;
+      const lastStroke = { ...current[current.length - 1] };
+      lastStroke.points = [...lastStroke.points, normalizedPos.x, normalizedPos.y];
+      current[current.length - 1] = lastStroke;
+      return { ...prev, [currentPage]: current };
+    });
+  };
+
+  const handleMouseUp = () => {
+    setIsDrawing(false);
+  };
+
+  const eraseAt = (pos: { x: number, y: number }) => {
+    setInkData(prev => {
+      const current = prev[currentPage] || [];
+      const updated = current.filter(stroke => {
+        for (let i = 0; i < stroke.points.length; i += 2) {
+          const px = stroke.points[i];
+          const py = stroke.points[i + 1];
+          const dx = px - pos.x;
+          const dy = py - pos.y;
+          if (Math.sqrt(dx * dx + dy * dy) < 0.02) return false;
+        }
+        return true;
+      });
+      if (updated.length === current.length) return prev;
+      return { ...prev, [currentPage]: updated };
+    });
+  };
+
+  const handleCorrectedFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    setIsUploadingCorrected(true);
+    try {
+      const fileId = await uploadFile(file, `Corrected_${submission.profiles?.full_name}_${file.name}`, submission.profiles?.email, submission.test_id);
+      setCorrectedFileId(fileId);
+      setCorrectedFile(file);
+      showNotification("Corrected copy uploaded successfully!");
+    } catch (err: any) {
+      showNotification("Error uploading corrected copy: " + err.message, 'error');
+    } finally {
+      setIsUploadingCorrected(false);
+    }
+  };
+
+  const generateCorrectedPdf = async () => {
+    const doc = new jsPDF({
+      orientation: 'p',
+      unit: 'mm',
+      format: 'a4'
+    });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+
+    const originalStyles: any[] = [];
+    const styleSheets = Array.from(document.styleSheets);
+    
+    // Pre-process all stylesheets to remove oklch which crashes html2canvas
+    let oklchCount = 0;
+    styleSheets.forEach((sheet, sIdx) => {
+      try {
+        if (sheet.href && !sheet.href.startsWith(window.location.origin)) return;
+        const rules = Array.from(sheet.cssRules || sheet.rules);
+        rules.forEach((rule, rIdx) => {
+          if (rule instanceof CSSStyleRule && rule.style) {
+            const cssText = rule.style.cssText;
+            if (cssText.includes('oklch')) {
+              oklchCount++;
+              originalStyles.push({ sIdx, rIdx, original: cssText });
+              rule.style.cssText = cssText.replace(/oklch\([^)]+\)/g, '#000000');
+            }
+          }
+        });
+      } catch (e) {
+        console.warn("Could not access stylesheet rules for", sheet.href);
+      }
+    });
+
+    for (let i = 0; i < totalPages; i++) {
+      showNotification(`Capturing page ${i + 1} of ${totalPages}...`);
+      
+      setCurrentPage(i);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      if (containerRef.current) {
+        const images = Array.from(containerRef.current.getElementsByTagName('img')) as HTMLImageElement[];
+        const imagePromises = images.map(img => {
+          if (img.complete) return Promise.resolve();
+          return new Promise(resolve => {
+            img.onload = resolve;
+            img.onerror = resolve;
+          });
+        });
+        await Promise.all(imagePromises);
+
+        const canvas = await html2canvas(containerRef.current, {
+          useCORS: true,
+          allowTaint: true,
+          scale: 2,
+          logging: false,
+          backgroundColor: '#ffffff'
+        });
+        
+        const imgData = canvas.toDataURL('image/jpeg', 0.9);
+        const canvasWidth = canvas.width;
+        const canvasHeight = canvas.height;
+        const canvasRatio = canvasWidth / canvasHeight;
+        
+        // Dynamically adjust page orientation for this specific page
+        const orientation = canvasRatio > 1 ? 'l' : 'p';
+        if (i === 0) {
+          doc.deletePage(1); // Remove default page
+        }
+        doc.addPage('a4', orientation);
+        
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const pageRatio = pageWidth / pageHeight;
+
+        let finalWidth, finalHeight, x, y;
+        if (canvasRatio > pageRatio) {
+          finalWidth = pageWidth;
+          finalHeight = pageWidth / canvasRatio;
+          x = 0;
+          y = (pageHeight - finalHeight) / 2;
+        } else {
+          finalHeight = pageHeight;
+          finalWidth = pageHeight * canvasRatio;
+          x = (pageWidth - finalWidth) / 2;
+          y = 0;
+        }
+
+        doc.addImage(imgData, 'JPEG', x, y, finalWidth, finalHeight, undefined, 'FAST');
+      }
+    }
+    
+    originalStyles.forEach(({ sIdx, rIdx, original }) => {
+      try {
+        const sheet = document.styleSheets[sIdx];
+        const rule = (sheet.cssRules || sheet.rules)[rIdx] as CSSStyleRule;
+        rule.style.cssText = original;
+      } catch (e) {}
+    });
+    
+    showNotification("Uploading corrected PDF to Drive...");
+    const pdfBlob = doc.output('blob') as Blob;
+    const fileName = `Corrected_Submission_${submission.profiles?.full_name}_${Date.now()}.pdf`;
+    return await uploadFile(pdfBlob, fileName, submission.profiles?.email, submission.test_id);
+  };
+
+  const saveGrading = async (isReturn = false) => {
+    if (isReturn) setIsReturning(true);
+    else setIsSaving(true);
+    
+    const finalMarks = isNaN(marks) ? 0 : marks;
+    
+    try {
+      let finalCorrectedId = correctedFileId;
+      
+      // If returning and no corrected file uploaded, generate one from annotations
+      if (isReturn && !finalCorrectedId) {
+        showNotification("Generating corrected PDF from annotations...");
+        finalCorrectedId = await generateCorrectedPdf();
+      }
+
+      const { error } = await supabase.from('submissions').update({
+        status: 'graded',
+        marks_obtained: finalMarks,
+        teacher_remarks: remarks,
+        grade_data: { ink: inkData, comments: textComments },
+        corrected_file_id: finalCorrectedId,
+        is_released: isReturn ? true : submission.is_released,
+        returned_at: isReturn ? new Date().toISOString() : submission.returned_at
+      }).eq('id', submission.id);
+      
+      if (error) throw error;
+
+      if (isReturn) {
+        await supabase.from('notifications').insert({
+          user_id: submission.student_id,
+          title: 'Paper Returned',
+          message: `Your submission for "${submission.tests?.title || 'the exam'}" has been graded and returned.`,
+          type: 'grade'
+        });
+      }
+
+      showNotification(isReturn ? "Submission returned to student!" : "Grading saved successfully!");
+      onBack();
+    } catch (err: any) {
+      showNotification("Error saving grade: " + err.message, 'error');
+    } finally {
+      setIsSaving(false);
+      setIsReturning(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/90 z-50 flex flex-col">
+      <header className="bg-white p-4 flex justify-between items-center shadow-md">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-full transition"><X /></button>
+          <div>
+            <h3 className="font-bold">Grading: {submission.profiles?.full_name}</h3>
+            <p className="text-xs text-gray-400">Submission ID: {submission.id}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-bold text-gray-500">Marks:</label>
+            <input 
+              type="number" 
+              value={isNaN(marks) ? '' : marks} 
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                setMarks(isNaN(val) ? 0 : val);
+              }}
+              className="w-20 px-2 py-1 border rounded font-bold text-primary outline-none focus:ring-2 focus:ring-primary"
+            />
+          </div>
+          <button onClick={() => saveGrading(false)} disabled={isSaving || isReturning} className="bg-gray-100 text-gray-600 px-4 py-2 rounded-lg font-bold hover:bg-gray-200 transition disabled:opacity-50">
+            {isSaving ? 'Saving...' : 'Save Draft'}
+          </button>
+          <button onClick={() => saveGrading(true)} disabled={isSaving || isReturning} className="bg-primary text-white px-6 py-2 rounded-lg font-bold hover:bg-primary/90 transition shadow-lg disabled:opacity-50 flex items-center gap-2">
+            <Send className="w-4 h-4" />
+            {isReturning ? 'Returning...' : 'Return to Student'}
+          </button>
+        </div>
+      </header>
+      
+      <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 relative overflow-hidden flex flex-col items-center justify-start p-4 md:p-8 bg-gray-900 overflow-y-auto">
+          <div className="relative bg-white shadow-2xl w-full max-w-5xl aspect-[3/4] md:aspect-auto md:h-[85vh] overflow-hidden shrink-0" ref={containerRef}>
+            {/* Tool Selector Overlay */}
+            <div className="absolute left-4 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-2 bg-white/90 backdrop-blur-sm p-2 rounded-xl shadow-xl border border-gray-200 pointer-events-auto">
+              <button 
+                onClick={() => setActiveTool('pen')}
+                className={cn(
+                  "p-3 rounded-lg transition-all duration-200",
+                  activeTool === 'pen' ? "bg-primary text-white shadow-lg scale-110" : "text-gray-400 hover:bg-gray-100"
+                )}
+                title="Pen Tool"
+              >
+                <Pencil className="w-5 h-5" />
+              </button>
+              <button 
+                onClick={() => setActiveTool('eraser')}
+                className={cn(
+                  "p-3 rounded-lg transition-all duration-200",
+                  activeTool === 'eraser' ? "bg-primary text-white shadow-lg scale-110" : "text-gray-400 hover:bg-gray-100"
+                )}
+                title="Eraser Tool"
+              >
+                <Eraser className="w-5 h-5" />
+              </button>
+              <button 
+                onClick={() => setActiveTool('text')}
+                className={cn(
+                  "p-3 rounded-lg transition-all duration-200",
+                  activeTool === 'text' ? "bg-primary text-white shadow-lg scale-110" : "text-gray-400 hover:bg-gray-100"
+                )}
+                title="Text Tool"
+              >
+                <Type className="w-5 h-5" />
+              </button>
+              <div className="h-px bg-gray-200 my-1" />
+              <button 
+                onClick={() => {
+                  if (window.confirm("Clear all annotations on this page?")) {
+                    setInkData(prev => ({ ...prev, [currentPage]: [] }));
+                    setTextComments(prev => ({ ...prev, [currentPage]: [] }));
+                  }
+                }}
+                className="p-3 rounded-lg text-red-400 hover:bg-red-50 transition-all duration-200"
+                title="Clear Page"
+              >
+                <Trash2 className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Image Page */}
+            {pageIds.length > 0 ? (
+              <StorageImage 
+                fileId={pageIds[currentPage]}
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                alt={`Page ${currentPage + 1}`}
+                crossOrigin="anonymous"
+              />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center text-gray-400">
+                No images submitted
+              </div>
+            )}
+            
+            {/* Annotation Overlay */}
+            <div className="absolute inset-0 z-20 pointer-events-none">
+              <Stage 
+                width={stageSize.width} 
+                height={stageSize.height}
+                ref={stageRef}
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onTouchStart={handleMouseDown}
+                onTouchMove={handleMouseMove}
+                onTouchEnd={handleMouseUp}
+                className="pointer-events-auto"
+              >
+                <Layer>
+                  {(inkData[currentPage] || []).map((stroke, i) => (
+                    <Line
+                      key={i}
+                      points={stroke.points.map((p: number, idx: number) => idx % 2 === 0 ? p * stageSize.width : p * stageSize.height)}
+                      stroke="#ff0000"
+                      strokeWidth={2}
+                      tension={0.5}
+                      lineCap="round"
+                      lineJoin="round"
+                    />
+                  ))}
+                  {(textComments[currentPage] || []).map((c, i) => (
+                    <Label
+                      key={i}
+                      x={c.x * stageSize.width}
+                      y={c.y * stageSize.height}
+                      offsetX={50}
+                      offsetY={20}
+                    >
+                      <Tag
+                        fill="#fef9c3"
+                        cornerRadius={4}
+                        stroke="#facc15"
+                        strokeWidth={1}
+                        shadowBlur={2}
+                      />
+                      <KonvaText
+                        text={c.text}
+                        fontSize={14}
+                        fill="#854d0e"
+                        fontStyle="bold"
+                        padding={8}
+                      />
+                    </Label>
+                  ))}
+                </Layer>
+              </Stage>
+            </div>
+          </div>
+
+          {/* Page Navigation */}
+          {totalPages > 1 && (
+            <div className="fixed bottom-8 left-[calc(50%-160px)] -translate-x-1/2 flex items-center gap-6 bg-white/10 px-6 py-3 rounded-full backdrop-blur-md z-30 border border-white/10">
+              <button 
+                onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+                disabled={currentPage === 0}
+                className="p-2 text-white hover:bg-white/20 rounded-full transition disabled:opacity-30"
+              >
+                <ChevronLeft className="w-6 h-6" />
+              </button>
+              <span className="text-white font-bold text-sm min-w-[100px] text-center">
+                Page {currentPage + 1} of {totalPages}
+              </span>
+              <button 
+                onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+                disabled={currentPage === totalPages - 1}
+                className="p-2 text-white hover:bg-white/20 rounded-full transition disabled:opacity-30"
+              >
+                <ChevronRight className="w-6 h-6" />
+              </button>
+            </div>
+          )}
+        </div>
+        
+        <div className="w-80 bg-white border-l p-6 flex flex-col gap-4">
+          <h4 className="font-bold text-gray-900 border-b pb-2">Grading Panel</h4>
+          <div>
+            <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Teacher Remarks</label>
+            <textarea 
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value)}
+              className="w-full h-32 p-3 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-primary transition"
+              placeholder="Add feedback for the student..."
+            />
+          </div>
+          
+          <div className="border-t pt-4">
+            <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Corrected Copy</label>
+            {correctedFileId ? (
+              <div className="bg-green-50 p-3 rounded-lg border border-green-100 mb-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-green-700">
+                    <FileCheck className="w-4 h-4" />
+                    <span className="text-xs font-bold truncate max-w-[150px]">
+                      {correctedFile ? correctedFile.name : 'File Uploaded'}
+                    </span>
+                  </div>
+                  <button 
+                    onClick={() => setCorrectedFileId(null)}
+                    className="text-red-500 hover:bg-red-50 p-1 rounded"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+                <button 
+                  onClick={() => window.open(getFileViewUrl(correctedFileId!, true), '_blank')}
+                  className="mt-2 text-[10px] text-green-600 font-bold hover:underline flex items-center gap-1"
+                >
+                  <ExternalLink className="w-3 h-3" /> View Uploaded File
+                </button>
+              </div>
+            ) : (
+              <div className="relative">
+                <input 
+                  type="file" 
+                  accept=".pdf,.doc,.docx"
+                  onChange={handleCorrectedFileUpload}
+                  className="hidden" 
+                  id="corrected-upload"
+                  disabled={isUploadingCorrected}
+                />
+                <label 
+                  htmlFor="corrected-upload"
+                  className={cn(
+                    "flex flex-col items-center justify-center p-4 border-2 border-dashed rounded-lg cursor-pointer transition hover:bg-gray-50",
+                    isUploadingCorrected ? "opacity-50 cursor-not-allowed" : "border-gray-200"
+                  )}
+                >
+                  <Upload className="w-6 h-6 text-gray-400 mb-2" />
+                  <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                    {isUploadingCorrected ? 'Uploading...' : 'Upload Corrected Copy'}
+                  </span>
+                  <span className="text-[8px] text-gray-400 mt-1">PDF or Word format</span>
+                </label>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-auto space-y-2">
+            <p className="text-[10px] text-gray-400 text-center">
+              Select the Text Tool and click anywhere on the paper to add a comment.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- Submission Viewer ---
+
+const SubmissionViewer = ({ submission, onBack }: { submission: any, onBack: () => void }) => {
+  const [currentPage, setCurrentPage] = useState(0);
+  const [showCorrected, setShowCorrected] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  
+  const pageIds = submission.page_ids || [];
+  const totalPages = pageIds.length;
+  
+  const [inkData, setInkData] = useState<{[key: number]: any[]}>(() => {
+    const raw = submission.grade_data?.ink || {};
+    const normalized: {[key: number]: any[]} = {};
+    Object.keys(raw).forEach(key => {
+      const idx = parseInt(key);
+      normalized[idx] = (raw[key] || []).map((stroke: any) => {
+        if (!stroke.points) return { ...stroke, points: [] };
+        let flat: number[] = [];
+        if (typeof stroke.points[0] === 'number') {
+          flat = stroke.points;
+        } else {
+          stroke.points.forEach((p: any) => {
+            if (p && typeof p.x === 'number' && typeof p.y === 'number') {
+              flat.push(p.x, p.y);
+            }
+          });
+        }
+        return { ...stroke, points: flat.filter(v => typeof v === 'number' && Number.isFinite(v)) };
+      });
+    });
+    return normalized;
+  });
+  const textComments = submission.grade_data?.comments || {};
+
+  useEffect(() => {
+    const resize = () => {
+      if (containerRef.current) {
+        setStageSize({
+          width: containerRef.current.clientWidth,
+          height: containerRef.current.clientHeight
+        });
+      }
+    };
+
+    window.addEventListener('resize', resize);
+    resize();
+    const timer = setTimeout(resize, 100);
+    return () => {
+      window.removeEventListener('resize', resize);
+      clearTimeout(timer);
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 bg-black/95 z-[200] flex flex-col">
+      <header className="bg-white p-4 flex justify-between items-center shadow-md">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-full transition"><X /></button>
+          <div>
+            <h3 className="font-bold text-sm md:text-base">View Submission: {submission.profiles?.full_name}</h3>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-400">ID: {submission.id}</span>
+              {submission.status === 'graded' && (
+                <span className="text-[10px] bg-green-100 text-green-600 px-1.5 py-0.5 rounded font-bold">GRADED</span>
+              )}
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          {submission.corrected_file_id && (
+            <button 
+              onClick={() => setShowCorrected(!showCorrected)}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-lg transition text-xs md:text-sm font-bold border",
+                showCorrected 
+                  ? "bg-primary text-white border-primary shadow-lg shadow-primary/20" 
+                  : "bg-green-50 text-green-600 border-green-100 hover:bg-green-100"
+              )}
+            >
+              {showCorrected ? <FileText className="w-4 h-4" /> : <FileCheck className="w-4 h-4" />}
+              {showCorrected ? "View Original" : "View Corrected Copy"}
+            </button>
+          )}
+          {submission.corrected_file_id && (
+            <button 
+              onClick={() => window.open(getFileViewUrl(submission.corrected_file_id, true), '_blank')}
+              className="p-2 text-gray-400 hover:text-primary transition"
+              title="Open in New Tab"
+            >
+              <ExternalLink className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden p-4 md:p-8 bg-gray-900 overflow-y-auto flex-col items-center">
+        <div className="relative bg-white shadow-2xl w-full max-w-5xl aspect-[3/4] md:aspect-auto md:h-[85vh] overflow-hidden shrink-0" ref={containerRef}>
+          {showCorrected && submission.corrected_file_id ? (
+            <PdfViewer 
+              url={getFileViewUrl(submission.corrected_file_id, true)}
+              className="absolute inset-0 w-full h-full border-none"
+              title="Corrected Submission"
+            />
+          ) : pageIds.length > 0 ? (
+            <>
+              <StorageImage 
+                fileId={pageIds[currentPage]}
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+                alt={`Page ${currentPage + 1}`}
+                crossOrigin="anonymous"
+              />
+              
+              {/* Annotation Overlay */}
+              <div className="absolute inset-0 z-20 pointer-events-none">
+                <Stage width={stageSize.width} height={stageSize.height}>
+                  <Layer>
+                    {(inkData[currentPage] || []).map((stroke: any, i: number) => (
+                      <Line
+                        key={i}
+                        points={stroke.points.map((p: number, idx: number) => idx % 2 === 0 ? p * stageSize.width : p * stageSize.height)}
+                        stroke="#ff0000"
+                        strokeWidth={2}
+                        tension={0.5}
+                        lineCap="round"
+                        lineJoin="round"
+                      />
+                    ))}
+                    {(textComments[currentPage] || []).map((c: any, i: number) => (
+                      <Label
+                        key={i}
+                        x={c.x * stageSize.width}
+                        y={c.y * stageSize.height}
+                        offsetX={50}
+                        offsetY={20}
+                      >
+                        <Tag
+                          fill="#fef9c3"
+                          cornerRadius={4}
+                          stroke="#facc15"
+                          strokeWidth={1}
+                          shadowBlur={2}
+                        />
+                        <KonvaText
+                          text={c.text}
+                          fontSize={14}
+                          fill="#854d0e"
+                          fontStyle="bold"
+                          padding={8}
+                        />
+                      </Label>
+                    ))}
+                  </Layer>
+                </Stage>
+              </div>
+            </>
+          ) : submission.google_drive_file_id ? (
+            <PdfViewer 
+              url={getEmbedUrl(getFileViewUrl(submission.google_drive_file_id, true))}
+              className="absolute inset-0 w-full h-full border-none"
+              title="Submission PDF"
+            />
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center text-gray-400">
+              No content available
+            </div>
+          )}
+        </div>
+
+        {totalPages > 1 && (
+          <div className="fixed bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-6 bg-white/10 px-6 py-3 rounded-full backdrop-blur-md z-30 border border-white/10">
+            <button 
+              onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+              disabled={currentPage === 0}
+              className="p-2 text-white hover:bg-white/20 rounded-full transition disabled:opacity-30"
+            >
+              <ChevronLeft className="w-6 h-6" />
+            </button>
+            <span className="text-white font-bold text-sm min-w-[100px] text-center">
+              Page {currentPage + 1} of {totalPages}
+            </span>
+            <button 
+              onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={currentPage === totalPages - 1}
+              className="p-2 text-white hover:bg-white/20 rounded-full transition disabled:opacity-30"
+            >
+              <ChevronRight className="w-6 h-6" />
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// --- Notification Bell Component ---
+
+const NotificationBell = ({ userId }: { userId: string }) => {
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+
+  useEffect(() => {
+    fetchNotifications().catch(err => console.error('Initial notification fetch rejection:', err));
+    const channel = supabase
+      .channel(`notifications_${userId}`)
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'notifications',
+        filter: `user_id=eq.${userId}`
+      }, () => {
+        fetchNotifications().catch(err => console.error('Channel notification fetch rejection:', err));
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [userId]);
+
+  const fetchNotifications = async () => {
+    const { data } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(10);
+    setNotifications(data || []);
+  };
+
+  const markAsRead = async (id: string) => {
+    try {
+      const { error } = await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+      if (error) console.error('Error marking notification as read:', error);
+      fetchNotifications().catch(err => console.error('Mark as read fetch rejection:', err));
+    } catch (err) {
+      console.error('Notification read update rejection:', err);
+    }
+  };
+
+  const unreadCount = notifications.filter(n => !n.is_read).length;
+
+  return (
+    <div className="relative">
+      <button 
+        onClick={() => setShowDropdown(!showDropdown)}
+        className="relative p-2 hover:bg-gray-100 rounded-full transition"
+      >
+        <Bell className="w-6 h-6 text-gray-600" />
+        {unreadCount > 0 && (
+          <span className="absolute top-0 right-0 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">
+            {unreadCount}
+          </span>
+        )}
+      </button>
+
+      <AnimatePresence>
+        {showDropdown && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-2xl border border-gray-100 z-50 overflow-hidden"
+          >
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
+              <h4 className="font-bold text-sm">Notifications</h4>
+              <button 
+                onClick={() => setShowDropdown(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="max-h-96 overflow-y-auto">
+              {notifications.length === 0 ? (
+                <div className="p-8 text-center text-gray-400 text-sm">
+                  No notifications yet
+                </div>
+              ) : (
+                notifications.map(n => (
+                  <div 
+                    key={n.id} 
+                    className={cn(
+                      "p-4 border-b last:border-0 transition cursor-pointer hover:bg-gray-50",
+                      !n.is_read ? "bg-blue-50/30" : ""
+                    )}
+                    onClick={() => markAsRead(n.id)}
+                  >
+                    <div className="flex justify-between items-start mb-1">
+                      <h5 className="font-bold text-xs text-gray-900">{n.title}</h5>
+                      <span className="text-[10px] text-gray-400">{new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                    </div>
+                    <p className="text-xs text-gray-600 leading-relaxed">{n.message}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+// --- Live Proctoring View ---
+
+const LiveProctoringView = ({ test, onBack }: { test: Test, onBack: () => void }) => {
+  const [activeSessions, setActiveSessions] = useState<any[]>([]);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [snapshots, setSnapshots] = useState<any[]>([]);
+  const [viewMode, setViewMode] = useState<Record<string, 'camera' | 'screen'>>({});
+  const [loading, setLoading] = useState(true);
+  const [isRequestingAudio, setIsRequestingAudio] = useState<string | null>(null);
+  const [isSendingWarning, setIsSendingWarning] = useState<string | null>(null);
+  const [activeChatStudent, setActiveChatStudent] = useState<string | null>(null);
+  const [allChats, setAllChats] = useState<any[]>([]);
+  const [chatMessage, setChatMessage] = useState('');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    fetchActiveSessions().catch(err => console.error('Initial sessions fetch rejection:', err));
+    fetchLogs().catch(err => console.error('Initial logs fetch rejection:', err));
+    fetchSnapshots().catch(err => console.error('Initial snapshots fetch rejection:', err));
+    fetchChats().catch(err => console.error('Initial chats fetch rejection:', err));
+
+    const sessionChannel = supabase
+      .channel(`live_sessions_${test.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'live_sessions', filter: `test_id=eq.${test.id}` }, (payload) => {
+        console.log('Session change detected:', payload);
+        fetchActiveSessions().catch(err => console.error('Channel sessions fetch rejection:', err));
+      })
+      .subscribe();
+
+    const logChannel = supabase
+      .channel(`proctoring_logs_${test.id}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'proctoring_logs', filter: `test_id=eq.${test.id}` }, (payload) => {
+        console.log('Log change detected:', payload);
+        fetchLogs().catch(err => console.error('Channel logs fetch rejection:', err));
+      })
+      .subscribe();
+
+    const snapshotChannel = supabase
+      .channel(`live_snapshots_${test.id}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_snapshots', filter: `test_id=eq.${test.id}` }, (payload) => {
+        console.log('Snapshot change detected:', payload);
+        fetchSnapshots().catch(err => console.error('Channel snapshots fetch rejection:', err));
+      })
+      .subscribe();
+
+    const chatChannel = supabase
+      .channel(`exam_chats_all_${test.id}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'exam_chats', filter: `test_id=eq.${test.id}` }, (payload) => {
+        setAllChats(prev => [...prev, payload.new]);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sessionChannel);
+      supabase.removeChannel(logChannel);
+      supabase.removeChannel(snapshotChannel);
+      supabase.removeChannel(chatChannel);
+    };
+  }, [test.id]);
+
+  const fetchChats = async () => {
+    const { data } = await supabase
+      .from('exam_chats')
+      .select('*')
+      .eq('test_id', test.id)
+      .order('created_at', { ascending: true });
+    if (data) setAllChats(data);
+  };
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [allChats, activeChatStudent]);
+
+  const sendChatMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatMessage.trim() || !activeChatStudent) return;
+    const msg = chatMessage;
+    const studentId = activeChatStudent;
+    setChatMessage('');
+    const { error } = await supabase.from('exam_chats').insert({
+      test_id: test.id,
+      student_id: studentId,
+      sender_id: (await supabase.auth.getUser()).data.user?.id,
+      message: msg
+    });
+    if (error) {
+      console.error('Error sending chat message:', error);
+      setChatMessage(msg);
+    }
+  };
+
+  const fetchActiveSessions = async () => {
+    console.log('Fetching active sessions for test:', test.id);
+    // Use a more robust join syntax or fallback
+    const { data, error } = await supabase
+      .from('live_sessions')
+      .select(`
+        *,
+        profiles (
+          full_name,
+          email
+        )
+      `)
+      .eq('test_id', test.id);
+    
+    if (error) {
+      console.error('Error fetching active sessions:', error);
+      // Fallback: try without profiles join if it fails
+      const { data: fallbackData, error: fallbackError } = await supabase
+        .from('live_sessions')
+        .select('*')
+        .eq('test_id', test.id);
+      if (fallbackError) console.error('Fallback fetch error:', fallbackError);
+      if (fallbackData) setActiveSessions(fallbackData);
+    } else if (data) {
+      console.log('Active sessions data:', data);
+      setActiveSessions(data);
+    }
+    setLoading(false);
+  };
+
+  const fetchLogs = async () => {
+    const { data, error } = await supabase
+      .from('proctoring_logs')
+      .select('*')
+      .eq('test_id', test.id)
+      .order('created_at', { ascending: false });
+    if (error) console.error('Error fetching logs:', error);
+    if (data) setLogs(data);
+  };
+
+  const fetchSnapshots = async () => {
+    // Fetch latest snapshots for each student and type
+    const { data, error } = await supabase
+      .from('live_snapshots')
+      .select('*')
+      .eq('test_id', test.id)
+      .order('created_at', { ascending: false })
+      .limit(100); // Limit to recent snapshots to keep state manageable
+    if (error) console.error('Error fetching snapshots:', error);
+    if (data) setSnapshots(data);
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+      <header className="p-6 bg-gray-800 border-b border-gray-700 flex justify-between items-center">
+        <div className="flex items-center gap-4">
+          <button onClick={onBack} className="p-2 hover:bg-gray-700 rounded-full transition"><ChevronLeft /></button>
+          <div>
+            <h2 className="text-xl font-bold">Live Proctoring: {test.title}</h2>
+            <p className="text-xs text-gray-400">{activeSessions.filter(s => s.is_active).length} Students Active</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={() => {
+              setLoading(true);
+              fetchActiveSessions().catch(err => console.error('Manual sessions fetch rejection:', err));
+              fetchLogs().catch(err => console.error('Manual logs fetch rejection:', err));
+              fetchSnapshots().catch(err => console.error('Manual snapshots fetch rejection:', err));
+            }}
+            className="p-2 hover:bg-gray-700 rounded-full transition text-gray-400 hover:text-white"
+            title="Refresh Data"
+          >
+            <RefreshCw className={cn("w-5 h-5", loading && "animate-spin")} />
+          </button>
+          <div className="flex items-center gap-2 bg-green-500/10 text-green-500 px-3 py-1 rounded-full text-xs font-bold border border-green-500/20">
+            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+            LIVE MONITORING
+          </div>
+        </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* Active Students Grid */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading && activeSessions.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4">
+              <Loader2 className="w-12 h-12 animate-spin text-primary" />
+              <p className="text-lg font-medium">Connecting to live streams...</p>
+            </div>
+          ) : activeSessions.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4">
+              <div className="w-20 h-20 bg-gray-800 rounded-full flex items-center justify-center">
+                <Users className="w-10 h-10 text-gray-600" />
+              </div>
+              <div className="text-center">
+                <p className="text-xl font-bold text-gray-300">No Students Active</p>
+                <p className="text-sm max-w-xs mt-2">Students will appear here once they start their proctoring session.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {activeSessions.map(session => {
+                const studentLogs = logs.filter(l => l.user_id === session.user_id);
+                const currentView = viewMode[session.user_id] || 'camera';
+                const latestSnapshot = snapshots.find(s => s.user_id === session.user_id && s.type === currentView);
+                const isOnline = session.is_active && (new Date().getTime() - new Date(session.last_seen).getTime() < 30000);
+                const studentName = session.profiles?.full_name || session.user_id.split('-')[0];
+
+                return (
+                  <div key={session.id} className="bg-gray-800 rounded-2xl border border-gray-700 overflow-hidden flex flex-col shadow-xl">
+                    {/* Header */}
+                    <div className="p-4 border-b border-gray-700 flex justify-between items-center bg-gray-800/50">
+                      <div className="flex items-center gap-3">
+                        <div className="relative">
+                          <div className="w-10 h-10 bg-primary/20 rounded-full flex items-center justify-center text-primary font-bold">
+                            {studentName[0]}
+                          </div>
+                          <div className={cn(
+                            "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-800",
+                            isOnline ? "bg-green-500" : "bg-gray-500"
+                          )} />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-sm truncate max-w-[120px]">{studentName}</h3>
+                          <p className="text-[10px] text-gray-400">{isOnline ? 'Online' : 'Offline'}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-1">
+                        <button 
+                          onClick={() => setViewMode(prev => ({ ...prev, [session.user_id]: 'camera' }))}
+                          className={cn("p-1.5 rounded-lg transition", currentView === 'camera' ? "bg-primary text-white" : "text-gray-400 hover:bg-gray-700")}
+                          title="Camera View"
+                        >
+                          <Camera className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => setViewMode(prev => ({ ...prev, [session.user_id]: 'screen' }))}
+                          className={cn("p-1.5 rounded-lg transition", currentView === 'screen' ? "bg-primary text-white" : "text-gray-400 hover:bg-gray-700")}
+                          title="Screen View"
+                        >
+                          <Monitor className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => setActiveChatStudent(session.user_id)}
+                          className={cn(
+                            "p-1.5 rounded-lg transition relative",
+                            activeChatStudent === session.user_id ? "bg-primary text-white" : "text-gray-400 hover:bg-gray-700"
+                          )}
+                          title="Chat with Student"
+                        >
+                          <MessageCircle className="w-4 h-4" />
+                          {allChats.filter(c => c.student_id === session.user_id && c.sender_id === session.user_id).length > 0 && (
+                            <div className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full border border-gray-800" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                
+                <div className="aspect-video bg-black relative flex items-center justify-center overflow-hidden group">
+                  {latestSnapshot ? (
+                    <img src={latestSnapshot.image_data} className="w-full h-full object-cover" alt="Live Feed" />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 text-gray-600">
+                      {currentView === 'camera' ? <User className="w-8 h-8" /> : <Monitor className="w-8 h-8" />}
+                      <span className="text-[10px] font-bold uppercase tracking-widest">Waiting for {currentView}...</span>
+                    </div>
+                  )}
+                  
+                  {/* Audio Level Overlay */}
+                  <div className="absolute bottom-2 left-2 flex items-center gap-2 bg-black/50 px-2 py-1 rounded-full backdrop-blur-sm">
+                    <Mic className={cn("w-3 h-3", session.audio_level > 30 ? "text-red-500 animate-pulse" : "text-green-500")} />
+                    <div className="w-12 h-1 bg-gray-700 rounded-full overflow-hidden">
+                      <motion.div 
+                        animate={{ width: `${Math.min(100, (session.audio_level || 0) * 2)}%` }}
+                        className={cn("h-full", session.audio_level > 50 ? "bg-red-500" : "bg-green-500")}
+                      />
+                    </div>
+                  </div>
+
+                  {session.is_low_data && (
+                    <div className="absolute top-2 right-2 bg-blue-500 text-white text-[8px] font-bold px-1.5 py-0.5 rounded uppercase">Low Data</div>
+                  )}
+                </div>
+
+                <div className="p-4 flex-1 flex flex-col gap-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">Recent Violations</span>
+                    <span className={cn("text-[10px] font-bold px-1.5 py-0.5 rounded", studentLogs.length > 0 ? "bg-red-500/20 text-red-500" : "bg-green-500/20 text-green-500")}>
+                      {studentLogs.length} Events
+                    </span>
+                  </div>
+                  <div className="flex-1 max-h-24 overflow-y-auto space-y-2">
+                    {studentLogs.length === 0 ? (
+                      <div className="text-[10px] text-gray-600 italic">No violations detected</div>
+                    ) : (
+                      studentLogs.map((log, i) => (
+                        <div key={i} className="text-[9px] bg-red-500/10 border border-red-500/20 p-2 rounded flex flex-col gap-2">
+                          <div className="flex justify-between items-center">
+                            <span className={cn("font-medium", log.event_type === 'audio_sample' ? "text-blue-400" : "text-red-400")}>
+                              {log.event_type.replace('_', ' ').toUpperCase()}
+                            </span>
+                            <span className="text-gray-500">{new Date(log.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </div>
+                          {log.audio_data && (
+                            <audio src={log.audio_data} controls className="w-full h-6 scale-90 origin-left" />
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="flex gap-2 mt-2">
+                    <button 
+                      disabled={isRequestingAudio === session.user_id}
+                      onClick={async () => {
+                        setIsRequestingAudio(session.user_id);
+                        try {
+                          const { error } = await supabase.from('notifications').insert({
+                            user_id: session.user_id,
+                            title: 'AUDIO CHECK',
+                            message: 'Please stay quiet, recording a short audio sample for verification.',
+                            type: 'audio_request'
+                          });
+                          if (error) throw error;
+                          alert("Audio request sent!");
+                        } catch (err) {
+                          console.error("Error sending audio request:", err);
+                          alert("Failed to send audio request.");
+                        } finally {
+                          setIsRequestingAudio(null);
+                        }
+                      }}
+                      className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold py-2 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-1"
+                    >
+                      {isRequestingAudio === session.user_id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Request Audio'}
+                    </button>
+                    <button 
+                      disabled={isSendingWarning === session.user_id}
+                      onClick={async () => {
+                        const msg = prompt("Enter warning message:");
+                        if (msg) {
+                          setIsSendingWarning(session.user_id);
+                          try {
+                            const { error } = await supabase.from('notifications').insert({
+                              user_id: session.user_id,
+                              title: 'PROCTORING WARNING',
+                              message: msg,
+                              type: 'warning'
+                            });
+                            if (error) throw error;
+                            alert("Warning sent to student!");
+                          } catch (err) {
+                            console.error("Error sending warning:", err);
+                            alert("Failed to send warning.");
+                          } finally {
+                            setIsSendingWarning(null);
+                          }
+                        }
+                      }}
+                      className="flex-1 bg-red-600 hover:bg-red-700 text-white text-[10px] font-bold py-2 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-1"
+                    >
+                      {isSendingWarning === session.user_id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Send Warning'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+          </div>
+        )}
+        </div>
+
+        {/* Global Activity Log */}
+        <div className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col">
+          {activeChatStudent ? (
+            <div className="flex-1 flex flex-col overflow-hidden">
+              <div className="p-4 border-b border-gray-700 font-bold text-sm flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <MessageCircle className="w-4 h-4 text-primary" />
+                  Chat: {activeSessions.find(s => s.user_id === activeChatStudent)?.profiles?.full_name || 'Student'}
+                </div>
+                <button onClick={() => setActiveChatStudent(null)} className="text-gray-500 hover:text-white">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-900/50">
+                {allChats.filter(c => c.student_id === activeChatStudent).length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-gray-600 text-center p-4">
+                    <MessageCircle className="w-8 h-8 mb-2 opacity-20" />
+                    <p className="text-[10px]">No messages yet. Start a conversation with the student.</p>
+                  </div>
+                ) : (
+                  allChats.filter(c => c.student_id === activeChatStudent).map((chat, i) => (
+                    <div key={i} className={cn(
+                      "flex flex-col max-w-[90%]",
+                      chat.sender_id !== activeChatStudent ? "ml-auto items-end" : "mr-auto items-start"
+                    )}>
+                      <div className={cn(
+                        "px-3 py-2 rounded-xl text-[11px] shadow-sm",
+                        chat.sender_id !== activeChatStudent 
+                          ? "bg-primary text-white rounded-tr-none" 
+                          : "bg-gray-700 text-gray-200 rounded-tl-none"
+                      )}>
+                        {chat.message}
+                      </div>
+                      <span className="text-[8px] text-gray-500 mt-1">
+                        {new Date(chat.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                  ))
+                )}
+                <div ref={chatEndRef} />
+              </div>
+
+              <form onSubmit={sendChatMessage} className="p-3 border-t border-gray-700 bg-gray-800 flex gap-2">
+                <input 
+                  type="text"
+                  value={chatMessage}
+                  onChange={(e) => setChatMessage(e.target.value)}
+                  placeholder="Type a message..."
+                  className="flex-1 bg-gray-900 border-none rounded-lg px-3 py-2 text-xs focus:ring-1 focus:ring-primary outline-none"
+                />
+                <button 
+                  type="submit"
+                  disabled={!chatMessage.trim()}
+                  className="bg-primary text-white p-2 rounded-lg hover:bg-primary/90 transition disabled:opacity-50"
+                >
+                  <Send className="w-3 h-3" />
+                </button>
+              </form>
+            </div>
+          ) : (
+            <>
+              <div className="p-4 border-b border-gray-700 font-bold text-sm flex items-center gap-2">
+                <Activity className="w-4 h-4 text-primary" />
+                Global Activity Log
+              </div>
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {logs.map((log, i) => (
+                  <div key={i} className="flex gap-3 items-start">
+                    <div className={cn(
+                      "p-1.5 rounded-lg shrink-0",
+                      log.event_type === 'tab_switch' ? "bg-orange-500/10 text-orange-500" : "bg-red-500/10 text-red-500"
+                    )}>
+                      {log.event_type === 'tab_switch' ? <AlertTriangle className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-bold text-gray-300">{log.event_type.replace('_', ' ').toUpperCase()}</div>
+                      <p className="text-[9px] text-gray-500 leading-tight">{log.details}</p>
+                      <div className="text-[8px] text-gray-600 mt-1">{new Date(log.created_at).toLocaleTimeString()}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- Teacher View ---
+
+// --- Teacher Dashboard Helper Components ---
+
+const MenuContent = ({ activeTab, setActiveTab, profile }: any) => (
+  <>
+    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-4 mb-2">Main Menu</div>
+    <button 
+      onClick={() => setActiveTab('tests')}
+      className={cn(
+        "w-full flex items-center gap-3 px-4 py-3 rounded-xl font-black transition-all duration-200",
+        activeTab === 'tests' ? "bg-primary text-white shadow-lg shadow-primary/20" : "text-slate-600 hover:bg-slate-50 hover:text-primary"
+      )}
+    >
+      <BookOpen className="w-5 h-5" /> 
+      <span className="text-sm">My Tests</span>
+    </button>
+    
+    {profile?.role === 'admin' && (
+      <button 
+        onClick={() => setActiveTab('users')}
+        className={cn(
+          "w-full flex items-center gap-3 px-4 py-3 rounded-xl font-black transition-all duration-200 mt-1",
+          activeTab === 'users' ? "bg-primary text-white shadow-lg shadow-primary/20" : "text-slate-600 hover:bg-slate-50 hover:text-primary"
+        )}
+      >
+        <Users className="w-5 h-5" /> 
+        <span className="text-sm">User Management</span>
+      </button>
+    )}
+
+    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-4 mt-6 mb-2">Support</div>
+    <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl font-black text-slate-600 hover:bg-slate-50 hover:text-primary transition-all">
+      <Bell className="w-5 h-5" />
+      <span className="text-sm">Updates</span>
+    </button>
+  </>
+);
+
+const UserCard = ({ profile, user }: any) => (
+  <div className="bg-white p-3 rounded-xl border border-slate-200 mb-4 shadow-sm group hover:border-primary/30 transition-all duration-300">
+    <div className="flex items-center gap-3">
+      <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-400 font-black group-hover:bg-primary group-hover:text-white transition-all shadow-sm">
+        {profile?.full_name?.charAt(0) || user.email?.charAt(0).toUpperCase()}
+      </div>
+      <div className="min-w-0">
+        <p className="text-sm font-black truncate text-slate-900 leading-none mb-1">{profile?.full_name || 'Admin User'}</p>
+        <p className="text-[10px] text-slate-400 truncate font-bold uppercase tracking-tight">{user.email}</p>
+      </div>
+    </div>
+  </div>
+);
+
+const TeacherDashboard = ({ user, profile, showNotification, setConfirmAction }: { user: any, profile: Profile | null, showNotification: (m: string, t?: 'success' | 'error') => void, setConfirmAction: (a: { message: string, onConfirm: () => void } | null) => void }) => {
+  const [tests, setTests] = useState<Test[]>([]);
+  const [selectedTest, setSelectedTest] = useState<Test | null>(null);
+  const [submissions, setSubmissions] = useState<any[]>([]);
+  const [isLowData, setIsLowData] = useState(false);
+  const [gradingSubmission, setGradingSubmission] = useState<any | null>(null);
+  const [viewingSubmission, setViewingSubmission] = useState<any | null>(null);
+  const [isProctoringViewOpen, setIsProctoringViewOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'tests' | 'users'>('tests');
+  const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [editingTestId, setEditingTestId] = useState<string | null>(null);
+  const [showQuestionPaper, setShowQuestionPaper] = useState(false);
+  const [newTestData, setNewTestData] = useState({
+    title: '',
+    subject: '',
+    total_marks: 100,
+    passing_marks: 35,
+    description: '',
+    question_paper_url: '',
+    assigned_students: null as string[] | null,
+    invigilator_id: user.id,
+    proctoring_config: { camera: true, mic: true, screen: true },
+    is_low_data_default: false,
+    start_time: new Date().toISOString().slice(0, 16),
+    end_time: new Date(Date.now() + 3600000).toISOString().slice(0, 16)
+  });
+
+  const calculateDuration = (start: string, end: string) => {
+    const s = new Date(start).getTime();
+    const e = new Date(end).getTime();
+    return Math.max(0, Math.floor((e - s) / 60000));
+  };
+
+  useEffect(() => {
+    fetchTests().catch(err => console.error('Initial tests fetch rejection:', err));
+    fetchAllProfiles().catch(err => console.error('Initial profiles fetch rejection:', err));
+  }, [profile]);
+
+  const fetchTests = async () => {
+    const { data } = await supabase.from('tests').select('*').eq('teacher_id', user.id);
+    if (data) setTests(data);
+  };
+
+  const fetchAllProfiles = async () => {
+    const { data, error } = await supabase.from('profiles').select('*');
+    if (error) console.error('Error fetching profiles:', error);
+    if (data) setAllProfiles(data);
+  };
+
+  const fetchSubmissions = async (testId: string) => {
+    const { data } = await supabase.from('submissions').select('*, profiles(full_name, email)').eq('test_id', testId);
+    if (data) setSubmissions(data);
+  };
+
+  const handleCreateTest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Ensure a course exists
+    let courseId = '';
+    const { data: courses } = await supabase.from('courses').select('id').limit(1);
+    if (courses && courses.length > 0) {
+      courseId = courses[0].id;
+    } else {
+      const { data: newCourse, error: courseError } = await supabase.from('courses').insert({
+        name: 'General Course',
+        teacher_id: user.id
+      }).select().single();
+      if (courseError) {
+        alert("Error creating course: " + courseError.message);
+        return;
+      }
+      courseId = newCourse.id;
+    }
+
+    const duration = calculateDuration(newTestData.start_time, newTestData.end_time);
+
+    if (editingTestId) {
+      const { error } = await supabase.from('tests').update({
+        ...newTestData,
+        duration_minutes: duration,
+        start_time: new Date(newTestData.start_time).toISOString(),
+        end_time: new Date(newTestData.end_time).toISOString()
+      }).eq('id', editingTestId);
+
+      if (error) {
+        alert("Error updating test: " + error.message);
+      } else {
+        setIsCreateModalOpen(false);
+        setEditingTestId(null);
+        fetchTests().catch(err => console.error('Update test fetch rejection:', err));
+        resetTestData();
+        showNotification("Test updated successfully!", 'success');
+      }
+    } else {
+      const { error } = await supabase.from('tests').insert({
+        ...newTestData,
+        course_id: courseId,
+        teacher_id: user.id,
+        duration_minutes: duration,
+        start_time: new Date(newTestData.start_time).toISOString(),
+        end_time: new Date(newTestData.end_time).toISOString()
+      });
+
+      if (error) {
+        alert("Error creating test: " + error.message);
+      } else {
+        setIsCreateModalOpen(false);
+        fetchTests().catch(err => console.error('Create test fetch rejection:', err));
+        resetTestData();
+        showNotification("Test created successfully!", 'success');
+      }
+    }
+  };
+
+  const resetTestData = () => {
+    setNewTestData({
+      title: '',
+      subject: '',
+      total_marks: 100,
+      passing_marks: 35,
+      description: '',
+      question_paper_url: '',
+      assigned_students: null,
+      invigilator_id: user.id,
+      proctoring_config: { camera: true, mic: true, screen: true },
+      is_low_data_default: false,
+      start_time: new Date().toISOString().slice(0, 16),
+      end_time: new Date(Date.now() + 3600000).toISOString().slice(0, 16)
+    });
+  };
+
+  const startEditingTest = (test: Test) => {
+    setEditingTestId(test.id);
+    setNewTestData({
+      title: test.title,
+      subject: test.subject,
+      total_marks: test.total_marks,
+      passing_marks: test.passing_marks,
+      description: test.description || '',
+      question_paper_url: test.question_paper_url || '',
+      assigned_students: test.assigned_students,
+      invigilator_id: test.invigilator_id,
+      proctoring_config: test.proctoring_config,
+      is_low_data_default: test.is_low_data_default,
+      start_time: new Date(test.start_time).toISOString().slice(0, 16),
+      end_time: new Date(test.end_time).toISOString().slice(0, 16)
+    });
+    setIsCreateModalOpen(true);
+  };
+
+  const handleTogglePause = async (testId: string, currentPaused: boolean) => {
+    try {
+      const { error } = await supabase
+        .from('tests')
+        .update({ is_paused: !currentPaused })
+        .eq('id', testId);
+      if (error) throw error;
+      fetchTests();
+    } catch (err: any) {
+      alert("Error toggling pause: " + err.message);
+    }
+  };
+
+  const handleModifyTiming = async (testId: string, extraMinutes: number) => {
+    try {
+      const test = tests.find(t => t.id === testId);
+      if (!test) return;
+      
+      const newEndTime = new Date(new Date(test.end_time).getTime() + extraMinutes * 60000).toISOString();
+      const newDuration = test.duration_minutes + extraMinutes;
+
+      const { error } = await supabase
+        .from('tests')
+        .update({ end_time: newEndTime, duration_minutes: newDuration })
+        .eq('id', testId);
+      if (error) throw error;
+      fetchTests();
+    } catch (err: any) {
+      alert("Error modifying timing: " + err.message);
+    }
+  };
+
+  const handleDeleteTest = async (testId: string) => {
+    setConfirmAction({
+      message: "Are you sure you want to delete this test? This action cannot be undone and all submissions will be lost.",
+      onConfirm: async () => {
+        try {
+          const { error } = await supabase.from('tests').delete().eq('id', testId);
+          if (error) throw error;
+          showNotification("Test deleted successfully", 'success');
+          fetchTests();
+        } catch (err: any) {
+          showNotification("Error deleting test: " + err.message, 'error');
+        } finally {
+          setConfirmAction(null);
+        }
+      }
+    });
+  };
+
+  if (gradingSubmission) {
+    return <GradingView 
+      submission={gradingSubmission} 
+      onBack={() => {
+        setGradingSubmission(null);
+        if (selectedTest) fetchSubmissions(selectedTest.id);
+      }} 
+      showNotification={showNotification}
+    />;
+  }
+
+  if (viewingSubmission) {
+    return <SubmissionViewer 
+      submission={viewingSubmission} 
+      onBack={() => setViewingSubmission(null)} 
+    />;
+  }
+
+  if (isProctoringViewOpen && selectedTest) {
+    return <LiveProctoringView 
+      test={selectedTest} 
+      onBack={() => setIsProctoringViewOpen(false)} 
+    />;
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex">
+      {/* Mobile Sidebar Overlay */}
+      <AnimatePresence>
+        {isSidebarOpen && (
+          <div className="fixed inset-0 z-50 md:hidden">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsSidebarOpen(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.aside 
+              initial={{ x: -280 }}
+              animate={{ x: 0 }}
+              exit={{ x: -280 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="absolute left-0 top-0 bottom-0 w-[280px] bg-white flex flex-col shadow-2xl"
+            >
+              <div className="p-6 border-b shrink-0 bg-primary/5 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Shield className="w-6 h-6 text-primary" />
+                  <h1 className="text-xl font-black tracking-tight text-slate-900 italic">Examfriendly</h1>
+                </div>
+                <button onClick={() => setIsSidebarOpen(false)} className="p-2 hover:bg-slate-100 rounded-lg">
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <nav className="flex-1 p-4 space-y-1.5 overflow-y-auto mt-2">
+                <MenuContent activeTab={activeTab} setActiveTab={(t) => { setActiveTab(t); setIsSidebarOpen(false); }} profile={profile} />
+              </nav>
+              <div className="p-4 border-t bg-slate-50/50">
+                <UserCard profile={profile} user={user} />
+                <button onClick={() => supabase.auth.signOut()} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 border border-red-100 hover:bg-red-50 rounded-xl font-bold transition-all">
+                  <LogOut className="w-5 h-5" /> Logout
+                </button>
+              </div>
+            </motion.aside>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Main Content */}
+      {/* Question Paper Overlay */}
+      {showQuestionPaper && selectedTest && (
+        <div className="fixed inset-0 bg-black/80 z-[200] flex flex-col">
+          <header className="p-4 bg-gray-900 text-white flex justify-between items-center shadow-xl">
+            <div className="flex items-center gap-4">
+              <button onClick={() => setShowQuestionPaper(false)} className="p-2 hover:bg-white/10 rounded-full transition">
+                <ArrowLeft className="w-6 h-6" />
+              </button>
+              <h3 className="font-bold text-lg">Question Paper Preview: {selectedTest.title}</h3>
+            </div>
+            <div className="flex gap-2">
+              <a 
+                href={getEmbedUrl(selectedTest.question_paper_url)} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition"
+              >
+                <ExternalLink className="w-4 h-4" /> Open in New Tab
+              </a>
+              <button 
+                onClick={() => setShowQuestionPaper(false)} 
+                className="bg-primary text-white px-6 py-2 rounded-lg font-bold shadow-lg hover:bg-primary/90 transition"
+              >
+                Close Preview
+              </button>
+            </div>
+          </header>
+          <div className="flex-1 p-0 md:p-8 overflow-auto flex justify-center bg-gray-100">
+            <div className="max-w-5xl w-full bg-white shadow-2xl min-h-full border flex flex-col">
+              {selectedTest.question_paper_url ? (
+                <PdfViewer 
+                  url={getEmbedUrl(selectedTest.question_paper_url)} 
+                  className="w-full flex-1 border-0" 
+                  title="Question Paper Preview"
+                  style={{ minHeight: '80vh' }}
+                />
+              ) : (
+                <div className="text-center py-20 flex-1 flex flex-col items-center justify-center">
+                  <FileText className="w-20 h-20 text-gray-200 mb-4" />
+                  <p className="text-gray-400 font-bold">No Question Paper available</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Desktop Sidebar */}
+      <aside className="w-64 bg-white border-r hidden md:flex flex-col sticky top-0 h-screen">
+        <div className="p-6 border-b shrink-0 bg-primary/5">
+          <div className="flex items-center gap-2 mb-1">
+            <Shield className="w-6 h-6 text-primary" />
+            <h1 className="text-xl font-black tracking-tight text-slate-900 italic">Examfriendly</h1>
+          </div>
+          <p className="text-[10px] font-bold text-primary uppercase tracking-widest">{profile?.role === 'admin' ? 'Administrator' : 'Teacher'}</p>
+        </div>
+        <nav className="flex-1 p-4 space-y-1.5 overflow-y-auto mt-2">
+          <MenuContent activeTab={activeTab} setActiveTab={setActiveTab} profile={profile} />
+        </nav>
+        <div className="p-4 border-t bg-slate-50/50">
+          <UserCard profile={profile} user={user} />
+          <button onClick={() => supabase.auth.signOut()} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 border border-red-100 hover:bg-red-50 rounded-xl font-bold transition-all">
+            <LogOut className="w-5 h-5" /> Logout
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col min-w-0">
+        <header className="bg-white/80 backdrop-blur-md border-b px-4 md:px-8 py-4 flex items-center justify-between sticky top-0 z-30">
+          <div className="flex items-center gap-4">
+            <button 
+              onClick={() => setIsSidebarOpen(true)}
+              className="md:hidden p-2 hover:bg-slate-100 rounded-lg transition-colors border border-slate-200"
+            >
+              <Menu className="w-6 h-6 text-slate-600" />
+            </button>
+            <h2 className="text-lg md:text-xl font-black text-slate-900 tracking-tight">
+              {activeTab === 'tests' ? (selectedTest ? 'Review Submissions' : 'Assigned Exams') : 'Manage Users'}
+            </h2>
+          </div>
+          
+          <div className="flex items-center gap-2 md:gap-6">
+            <div className="hidden lg:flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl">
+              <input 
+                type="checkbox" 
+                id="lowDataMode"
+                checked={isLowData} 
+                onChange={async (e) => {
+                  const checked = e.target.checked;
+                  setIsLowData(checked);
+                  if (selectedTest) {
+                    const { error } = await supabase
+                      .from('live_sessions')
+                      .update({ is_low_data: checked })
+                      .eq('test_id', selectedTest.id);
+                    if (error) console.error('Error updating low data mode:', error);
+                  }
+                }}
+                className="w-4 h-4 text-primary rounded border-slate-300 focus:ring-primary"
+              />
+              <label htmlFor="lowDataMode" className="text-xs font-bold text-slate-500 cursor-pointer select-none">
+                LOW DATA MODE
+              </label>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <NotificationBell userId={user.id} />
+              <div className="h-8 w-px bg-slate-200 mx-2 hidden sm:block"></div>
+              <div className="hidden sm:block text-right">
+                <p className="text-xs font-bold text-slate-900 line-clamp-1">{profile?.full_name}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{profile?.role}</p>
+              </div>
+              <div className="w-8 h-8 rounded-lg bg-primary text-white flex items-center justify-center font-bold text-sm shadow-lg shadow-primary/20">
+                {profile?.full_name?.charAt(0) || 'T'}
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-4 md:p-8">
+          {activeTab === 'tests' ? (
+            !selectedTest ? (
+              <div className="max-w-7xl mx-auto">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+                  <div>
+                    <h3 className="text-2xl font-black text-slate-900 tracking-tight">Active Tests</h3>
+                    <p className="text-sm text-slate-500 font-medium">Manage your exams, timings, and proctoring settings.</p>
+                  </div>
+                  <button 
+                    onClick={() => { resetTestData(); setEditingTestId(null); setIsCreateModalOpen(true); }}
+                    className="flex items-center justify-center gap-2 bg-primary text-white px-6 py-3 rounded-xl font-bold shadow-xl shadow-primary/25 hover:bg-primary/90 transition-all transform hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <Plus className="w-5 h-5" /> Create New Test
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                  {tests.map(test => (
+                    <motion.div 
+                      key={test.id}
+                      whileHover={{ y: -4 }}
+                      onClick={() => {
+                        setSelectedTest(test);
+                        fetchSubmissions(test.id);
+                      }}
+                      className="group bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden cursor-pointer hover:shadow-xl hover:border-primary/20 transition-all duration-300"
+                    >
+                      <div className="p-6">
+                        <div className="flex justify-between items-start mb-6">
+                          <div className="p-3 bg-slate-50 rounded-2xl group-hover:bg-primary/10 transition-colors">
+                            <FileText className="text-slate-400 group-hover:text-primary w-6 h-6 transition-colors" />
+                          </div>
+                          <div className="flex flex-col items-end gap-1.5">
+                            {test.is_paused ? (
+                              <span className="flex items-center gap-1.5 text-[10px] font-black bg-orange-100 text-orange-600 px-2.5 py-1 rounded-full uppercase tracking-wider">
+                                <Clock className="w-3 h-3" /> Paused
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1.5 text-[10px] font-black bg-green-100 text-green-600 px-2.5 py-1 rounded-full uppercase tracking-wider">
+                                <Activity className="w-3 h-3" /> Live
+                              </span>
+                            )}
+                            <span className="text-[10px] font-black bg-slate-100 text-slate-500 px-2.5 py-1 rounded-full uppercase tracking-wider">
+                              {test.subject}
+                            </span>
+                          </div>
+                        </div>
+                        
+                        <h3 className="font-black text-xl text-slate-900 mb-2 leading-tight group-hover:text-primary transition-colors">{test.title}</h3>
+                        <p className="text-slate-500 text-sm font-medium line-clamp-2 mb-6 h-10">{test.description || 'No description provided for this test.'}</p>
+                        
+                        <div className="grid grid-cols-2 gap-4 mb-6">
+                          <div className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Duration</p>
+                            <p className="text-sm font-black text-slate-700">{test.duration_minutes} Minutes</p>
+                          </div>
+                          <div className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Students</p>
+                            <p className="text-sm font-black text-slate-700">{test.assigned_students?.length || 'All'}</p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); handleTogglePause(test.id, test.is_paused); }}
+                            className={cn(
+                              "flex-1 py-2.5 rounded-xl text-xs font-black transition-all",
+                              test.is_paused ? "bg-green-600 text-white shadow-lg shadow-green-200" : "bg-orange-500 text-white shadow-lg shadow-orange-200"
+                            )}
+                          >
+                            {test.is_paused ? 'Resume' : 'Pause'}
+                          </button>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); startEditingTest(test); }}
+                            className="p-2.5 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-all font-black text-xs"
+                            title="Edit"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); handleDeleteTest(test.id); }}
+                            className="p-2.5 bg-red-50 text-red-500 rounded-xl hover:bg-red-500 hover:text-white transition-all font-black text-xs"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                  
+                  <button 
+                    onClick={() => { resetTestData(); setEditingTestId(null); setIsCreateModalOpen(true); }}
+                    className="border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center text-slate-400 hover:border-primary hover:text-primary hover:bg-primary/5 transition-all p-8 group"
+                  >
+                    <div className="w-16 h-16 rounded-2xl bg-slate-50 flex items-center justify-center mb-4 group-hover:bg-primary/10 transition-colors">
+                      <Plus className="w-8 h-8 group-hover:scale-110 transition-transform" />
+                    </div>
+                    <span className="font-black text-lg">Create Exam</span>
+                    <p className="text-xs font-medium mt-1">Set up a new automated exam</p>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <button 
+                    onClick={() => setSelectedTest(null)} 
+                    className="text-slate-500 font-bold flex items-center gap-2 hover:text-primary transition-colors group w-fit"
+                  >
+                    <div className="p-1.5 rounded-lg bg-slate-100 group-hover:bg-primary group-hover:text-white transition-colors">
+                      <ChevronLeft className="w-4 h-4" />
+                    </div>
+                    Back to Exams List
+                  </button>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button 
+                      onClick={() => setShowQuestionPaper(true)}
+                      className="flex-1 sm:flex-none border border-slate-200 bg-white text-slate-700 px-4 py-2.5 rounded-xl text-sm font-black flex items-center justify-center gap-2 hover:bg-slate-50 transition-all shadow-sm"
+                    >
+                      <FileText className="w-4 h-4 text-slate-400" /> View Paper
+                    </button>
+                    <button 
+                      onClick={() => setIsProctoringViewOpen(true)}
+                      className="flex-1 sm:flex-none bg-orange-50 text-orange-600 px-4 py-2.5 rounded-xl text-sm font-black flex items-center justify-center gap-2 hover:bg-orange-100 transition-all shadow-sm border border-orange-100"
+                    >
+                      <ShieldAlert className="w-4 h-4" /> Live Proctoring
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/40 border border-slate-100 overflow-hidden overflow-x-auto">
+                  <div className="p-6 md:p-8 border-b bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-6 min-w-max md:min-w-0">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="flex items-center gap-1.5 px-3 py-1 bg-green-100 text-green-600 text-[10px] font-black rounded-full uppercase tracking-widest leading-none shrink-0"><Activity className="w-3 h-3" /> Live Session</span>
+                        <span className="flex items-center gap-1.5 px-3 py-1 bg-primary/10 text-primary text-[10px] font-black rounded-full uppercase tracking-widest leading-none shrink-0">{selectedTest.subject}</span>
+                      </div>
+                      <h3 className="font-black text-2xl text-slate-900 leading-tight">{selectedTest.title}</h3>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 md:gap-6 shrink-0">
+                      <div className="text-center min-w-[70px]">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Enrolled</p>
+                        <p className="text-lg font-black text-slate-900 leading-none">{selectedTest.assigned_students?.length || '∞'}</p>
+                      </div>
+                      <div className="h-8 w-px bg-slate-200"></div>
+                      <div className="text-center min-w-[70px]">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Uploaded</p>
+                        <p className="text-lg font-black text-slate-900 leading-none">{submissions.length}</p>
+                      </div>
+                      <div className="h-8 w-px bg-slate-200"></div>
+                      <div className="text-center min-w-[70px]">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Avg %</p>
+                        <p className="text-lg font-black text-slate-900 leading-none">
+                          {submissions.length > 0 && selectedTest.total_marks > 0
+                            ? Math.round((submissions.filter(s => s.status === 'graded' || s.is_released).reduce((acc, s) => acc + (s.marks_obtained || 0), 0) / (submissions.filter(s => s.status === 'graded' || s.is_released).length || 1) / selectedTest.total_marks) * 100)
+                            : '--'}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="px-6 py-4 bg-white border-b flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Global:</span>
+                      <button 
+                        onClick={() => {
+                          setConfirmAction({
+                            message: `Are you sure you want to release scores for all ${submissions.filter(s => s.status === 'graded' && !s.is_released).length} graded students?`,
+                            onConfirm: async () => {
+                              try {
+                                const { error } = await supabase
+                                  .from('submissions')
+                                  .update({ is_released: true, returned_at: new Date().toISOString() })
+                                  .eq('test_id', selectedTest.id)
+                                  .eq('status', 'graded');
+                                if (error) throw error;
+                                showNotification("Graded papers released successfully!");
+                                fetchSubmissions(selectedTest.id);
+                              } catch (err: any) {
+                                showNotification(err.message, 'error');
+                              } finally {
+                                setConfirmAction(null);
+                              }
+                            }
+                          });
+                        }}
+                        className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-green-600 text-white px-4 py-2.5 rounded-xl text-xs font-black hover:bg-green-700 transition-all shadow-lg shadow-green-100"
+                      >
+                        <Send className="w-3.5 h-3.5" /> Release Graded
+                      </button>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        submissions.forEach(sub => {
+                          if (sub.google_drive_file_id) window.open(getFileViewUrl(sub.google_drive_file_id), '_blank');
+                        });
+                      }}
+                      className="flex items-center justify-center gap-2 border border-slate-200 bg-white text-slate-700 px-4 py-2.5 rounded-xl text-xs font-black hover:bg-slate-50 transition-all"
+                    >
+                      <Download className="w-3.5 h-3.5 text-slate-400" /> Export All Originals
+                    </button>
+                  </div>
+
+                  <div className="overflow-x-auto overflow-y-hidden">
+                    <table className="w-full text-left border-collapse min-w-[800px]">
+                      <thead>
+                        <tr className="bg-slate-50/50 border-b border-slate-100">
+                          <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Candidate</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Timing</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</th>
+                          <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {submissions.length === 0 ? (
+                          <tr>
+                            <td colSpan={4} className="px-8 py-20 text-center">
+                              <div className="flex flex-col items-center">
+                                <Users className="w-12 h-12 text-slate-200 mb-4" />
+                                <p className="text-slate-400 font-bold italic tracking-tight">No submissions yet for this exam.</p>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : (
+                          submissions.map(sub => (
+                            <tr key={sub.id} className="group hover:bg-slate-50/50 transition-colors">
+                              <td className="px-8 py-5">
+                                <div className="flex items-center gap-4">
+                                  <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 font-black group-hover:bg-primary group-hover:text-white group-hover:border-primary transition-all shadow-sm">
+                                    {sub.profiles?.full_name?.charAt(0) || '?'}
+                                  </div>
+                                  <div>
+                                    <div className="font-black text-slate-900 group-hover:text-primary transition-colors">{sub.profiles?.full_name || 'Anonymous Candidate'}</div>
+                                    <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{sub.profiles?.email}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-8 py-5">
+                                <div className="text-sm font-black text-slate-700">
+                                  {new Date(sub.submitted_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-black uppercase tracking-widest flex items-center gap-1">
+                                  <Clock className="w-3 h-3" /> {new Date(sub.submitted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </div>
+                              </td>
+                              <td className="px-8 py-5">
+                                <div className="flex flex-col gap-1.5">
+                                  <div className={cn(
+                                    "flex items-center gap-2 px-3 py-1 rounded-full border w-fit",
+                                    sub.is_released ? "bg-green-50 text-green-700 border-green-100" : 
+                                    sub.status === 'graded' ? "bg-primary/5 text-primary border-primary/20" : 
+                                    "bg-orange-50 text-orange-700 border-orange-100 animate-pulse"
+                                  )}>
+                                    <div className={cn(
+                                      "w-1.5 h-1.5 rounded-full",
+                                      sub.is_released ? "bg-green-500" : sub.status === 'graded' ? "bg-primary" : "bg-orange-500"
+                                    )} />
+                                    <span className="text-[10px] font-black uppercase tracking-widest">
+                                      {sub.is_released ? 'Released' : sub.status === 'graded' ? 'Graded (Draft)' : 'Evaluating'}
+                                    </span>
+                                  </div>
+                                  {(sub.status === 'graded' || sub.is_released) && (
+                                    <div className="text-[10px] font-black text-slate-900 flex items-center gap-2">
+                                      <span>{sub.marks_obtained} / {selectedTest.total_marks} Marks</span>
+                                      <div className="w-12 h-1 bg-slate-100 rounded-full overflow-hidden">
+                                        <div 
+                                          className={cn("h-full", (sub.marks_obtained / selectedTest.total_marks) >= 0.35 ? "bg-green-500" : "bg-red-500")}
+                                          style={{ width: `${(sub.marks_obtained / (selectedTest.total_marks || 1)) * 100}%` }}
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-8 py-5">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button 
+                                    onClick={() => setViewingSubmission(sub)}
+                                    className="p-2.5 text-slate-400 hover:text-slate-900 hover:bg-white hover:border-slate-300 border border-transparent rounded-xl transition-all shadow-sm group/btn"
+                                    title="View Answer Sheet"
+                                  >
+                                    <Eye className="w-4 h-4 group-hover/btn:scale-110 transition-transform" />
+                                  </button>
+
+                                  <button 
+                                    onClick={() => setGradingSubmission(sub)}
+                                    className={cn(
+                                      "flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-black transition-all shadow-lg",
+                                      sub.status === 'graded' ? "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 shadow-slate-100" : "bg-primary text-white hover:bg-primary/90 shadow-primary/20"
+                                    )}
+                                  >
+                                    <PenTool className="w-3.5 h-3.5" /> 
+                                    {sub.status === 'graded' ? 'Regrade' : 'Evaluate'}
+                                  </button>
+                                  
+                                  {sub.status === 'graded' && !sub.is_released && (
+                                    <button 
+                                      onClick={async () => {
+                                        try {
+                                          const { error } = await supabase
+                                            .from('submissions')
+                                            .update({ is_released: true, returned_at: new Date().toISOString() })
+                                            .eq('id', sub.id);
+                                          if (!error) {
+                                            showNotification("Results released to student!");
+                                            fetchSubmissions(selectedTest.id);
+                                          } else throw error;
+                                        } catch (err: any) {
+                                          showNotification(err.message, 'error');
+                                        }
+                                      }}
+                                      className="p-2.5 bg-green-50 text-green-600 rounded-xl hover:bg-green-100 transition-all border border-green-100 shadow-sm"
+                                      title="Release Result"
+                                    >
+                                      <Send className="w-4 h-4" />
+                                    </button>
+                                  )}
+                                  
+                                  <button 
+                                    onClick={() => downloadSubmissionAsPdf(sub, showNotification)}
+                                    className="p-2.5 text-blue-500 hover:bg-blue-50 border border-transparent hover:border-blue-100 rounded-xl transition-all"
+                                    title="Download PDF Copy"
+                                  >
+                                    <Download className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="space-y-6">
+              <div className="bg-white rounded-3xl shadow-xl shadow-slate-200/40 border border-slate-100 overflow-hidden">
+                <div className="p-6 md:p-8 border-b bg-slate-50/50 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                  <div>
+                    <h3 className="font-black text-2xl text-slate-900 tracking-tight mb-1">User Management</h3>
+                    <p className="text-slate-400 text-sm font-bold tracking-tight">Manage roles and permissions for your institution.</p>
+                  </div>
+                  <div className="bg-primary/5 text-primary p-4 rounded-2xl text-xs flex items-center gap-3 border border-primary/10 max-w-md">
+                    <AlertTriangle className="w-5 h-5 shrink-0 opacity-50" />
+                    <p className="leading-relaxed"><span className="font-black uppercase tracking-widest text-[10px] block mb-1">Administrator Note:</span> AUTH management must be done via Supabase Dashboard. Use this panel ONLY for role assignments.</p>
+                  </div>
+                </div>
+                
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse min-w-[800px]">
+                    <thead>
+                      <tr className="bg-slate-50/50 border-b border-slate-100">
+                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">User Profile</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Institutional Role</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Member Since</th>
+                        <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {allProfiles.map(p => (
+                        <tr key={p.id} className="group hover:bg-slate-50/50 transition-colors">
+                          <td className="px-8 py-5">
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-400 font-black group-hover:bg-primary group-hover:text-white transition-all shadow-sm">
+                                {p.full_name?.charAt(0) || '?'}
+                              </div>
+                              <div>
+                                <div className="font-black text-slate-900">{p.full_name || 'Anonymous User'}</div>
+                                <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{p.email}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-8 py-5 text-center">
+                            <select 
+                              value={p.role}
+                              onChange={async (e) => {
+                                const newRole = e.target.value as any;
+                                const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', p.id);
+                                if (!error) {
+                                  showNotification(`Role updated for ${p.full_name}`);
+                                  fetchAllProfiles();
+                                } else showNotification(error.message, 'error');
+                              }}
+                              className="bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-widest text-slate-700 outline-none focus:ring-4 focus:ring-primary/10 focus:border-primary transition-all cursor-pointer shadow-sm appearance-none min-w-[140px] text-center"
+                            >
+                              <option value="student">🎓 Student</option>
+                              <option value="teacher">👨‍🏫 Teacher</option>
+                              <option value="admin">🛡️ Administrator</option>
+                            </select>
+                          </td>
+                          <td className="px-8 py-5">
+                            <div className="flex items-center gap-2 text-slate-500 font-bold text-xs uppercase tracking-tight">
+                              <Calendar className="w-3.5 h-3.5 opacity-30" />
+                              {new Date(p.created_at || '').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </div>
+                          </td>
+                          <td className="px-8 py-5 text-right">
+                            <button className="px-4 py-2 text-red-500 hover:bg-red-50 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">Revoke Access</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Create Test Modal */}
+        <AnimatePresence>
+          {isCreateModalOpen && (
+            <div className="fixed inset-0 bg-black/50 z-[110] flex items-center justify-center p-4">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="bg-white rounded-2xl shadow-xl max-w-lg w-full overflow-hidden"
+              >
+                <div className="p-6 border-b flex justify-between items-center">
+                  <h3 className="text-xl font-bold">{editingTestId ? 'Edit Test' : 'Create New Test'}</h3>
+                  <button onClick={() => { setIsCreateModalOpen(false); setEditingTestId(null); resetTestData(); }} className="p-2 hover:bg-gray-100 rounded-full"><X /></button>
+                </div>
+                <form onSubmit={handleCreateTest} className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Test Title</label>
+                      <input 
+                        type="text" 
+                        required
+                        value={newTestData.title}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, title: e.target.value }))}
+                        className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                        placeholder="e.g. Midterm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                      <input 
+                        type="text" 
+                        required
+                        value={newTestData.subject}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, subject: e.target.value }))}
+                        className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                        placeholder="e.g. Mathematics"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Total Marks</label>
+                      <input 
+                        type="number" 
+                        required
+                        value={newTestData.total_marks || ''}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, total_marks: parseInt(e.target.value) || 0 }))}
+                        className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Passing Marks</label>
+                      <input 
+                        type="number" 
+                        required
+                        value={newTestData.passing_marks || ''}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, passing_marks: parseInt(e.target.value) || 0 }))}
+                        className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Start Time</label>
+                      <input 
+                        type="datetime-local" 
+                        required
+                        value={newTestData.start_time}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, start_time: e.target.value }))}
+                        className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">End Time</label>
+                      <input 
+                        type="datetime-local" 
+                        required
+                        value={newTestData.end_time}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, end_time: e.target.value }))}
+                        className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Question Paper (PDF or Direct Link)</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        value={newTestData.question_paper_url}
+                        onChange={(e) => setNewTestData(prev => ({ ...prev, question_paper_url: e.target.value }))}
+                        className="flex-1 px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                        placeholder="Direct URL or ID"
+                      />
+                      <label className="bg-gray-100 hover:bg-gray-200 text-gray-600 px-4 py-2 rounded-lg font-bold cursor-pointer transition flex items-center gap-2">
+                        <Upload className="w-4 h-4" />
+                        <span className="text-xs">Upload PDF</span>
+                        <input 
+                          type="file" 
+                          accept="application/pdf" 
+                          className="hidden" 
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            try {
+                              const fileId = await uploadFile(file, `${newTestData.title}_QuestionPaper.pdf`, user.email!, newTestData.title);
+                              const previewUrl = getEmbedUrl(fileId);
+                              setNewTestData(prev => ({ ...prev, question_paper_url: previewUrl }));
+                              showNotification("Question paper uploaded successfully!", 'success');
+                            } catch (err: any) {
+                              console.error("Upload error:", err);
+                              showNotification(err.message || "Failed to upload. Please check your connection.", 'error');
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Assign Students</label>
+                    <select 
+                      multiple
+                      className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition h-24"
+                      onChange={(e) => {
+                        const select = e.target as HTMLSelectElement;
+                        const values = Array.from(select.selectedOptions, option => option.value);
+                        setNewTestData(prev => ({ ...prev, assigned_students: values.includes('all') ? null : values }));
+                      }}
+                    >
+                      <option value="all">All Students</option>
+                      {allProfiles.filter(p => p.role === 'student').map(s => (
+                        <option key={s.id} value={s.id}>{s.full_name || s.email}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Assign Invigilator</label>
+                    <select 
+                      value={newTestData.invigilator_id}
+                      onChange={(e) => setNewTestData(prev => ({ ...prev, invigilator_id: e.target.value }))}
+                      className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-primary outline-none transition"
+                    >
+                      {allProfiles.filter(p => p.role === 'teacher' || p.role === 'admin').map(t => (
+                        <option key={t.id} value={t.id}>{t.full_name || t.email}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t">
+                    <h4 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Advanced Settings</h4>
+                    <div className="flex flex-wrap gap-4">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={newTestData.proctoring_config.camera}
+                          onChange={(e) => setNewTestData(prev => ({ ...prev, proctoring_config: { ...prev.proctoring_config, camera: e.target.checked } }))}
+                          className="w-4 h-4 text-primary rounded"
+                        />
+                        Camera
+                      </label>
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={newTestData.proctoring_config.mic}
+                          onChange={(e) => setNewTestData(prev => ({ ...prev, proctoring_config: { ...prev.proctoring_config, mic: e.target.checked } }))}
+                          className="w-4 h-4 text-primary rounded"
+                        />
+                        Mic
+                      </label>
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={newTestData.proctoring_config.screen}
+                          onChange={(e) => setNewTestData(prev => ({ ...prev, proctoring_config: { ...prev.proctoring_config, screen: e.target.checked } }))}
+                          className="w-4 h-4 text-primary rounded"
+                        />
+                        Screen
+                      </label>
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={newTestData.is_low_data_default}
+                          onChange={(e) => setNewTestData(prev => ({ ...prev, is_low_data_default: e.target.checked }))}
+                          className="w-4 h-4 text-primary rounded"
+                        />
+                        Low Data Mode
+                      </label>
+                    </div>
+                  </div>
+
+                  <button 
+                    type="submit"
+                    className="w-full bg-primary text-white font-bold py-3 rounded-lg hover:bg-primary/90 transition shadow-lg mt-4"
+                  >
+                    {editingTestId ? 'Update Test' : 'Create Test'}
+                  </button>
+                </form>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+      </main>
+    </div>
+  );
+};
+
+const StudentDashboard = ({ user, profile, onEnterExam, showNotification }: { user: any, profile: Profile, onEnterExam: (test: Test) => void, showNotification: (m: string, t?: 'success' | 'error') => void }) => {
+  const [tests, setTests] = useState<Test[]>([]);
+  const [submissions, setSubmissions] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [viewingSubmission, setViewingSubmission] = useState<any | null>(null);
+
+  useEffect(() => {
+    fetchData().catch(err => console.error('Initial student data fetch rejection:', err));
+
+    // Subscribe to submission changes
+    const subChannel = supabase
+      .channel(`student_subs_${user.id}`)
+      .on('postgres_changes', { 
+        event: '*', 
+        schema: 'public', 
+        table: 'submissions',
+        filter: `student_id=eq.${user.id}`
+      }, () => {
+        fetchData().catch(err => console.error('Channel student subs fetch rejection:', err));
+      })
+      .subscribe();
+
+    // Subscribe to test changes (auto-refresh dashboard)
+    const testChannel = supabase
+      .channel(`student_tests_${user.id}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'tests'
+      }, () => {
+        fetchData().catch(err => console.error('Channel student tests fetch rejection:', err));
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(subChannel);
+      supabase.removeChannel(testChannel);
+    };
+  }, []);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      // Fetch tests assigned to this student or all students
+      const { data: testsData } = await supabase
+        .from('tests')
+        .select('*')
+        .or(`assigned_students.is.null,assigned_students.cs.{"${user.id}"}`)
+        .order('start_time', { ascending: false });
+
+      // Fetch student's submissions
+      const { data: subsData } = await supabase
+        .from('submissions')
+        .select('*')
+        .eq('student_id', user.id);
+
+      setTests(testsData || []);
+      setSubmissions(subsData || []);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getSubmissionForTest = (testId: string) => {
+    return submissions.find(s => s.test_id === testId);
+  };
+
+  const handleRequestRecheck = async (subId: string) => {
+    try {
+      const sub = submissions.find(s => s.id === subId);
+      if (!sub) return;
+      
+      const test = tests.find(t => t.id === sub.test_id);
+      if (!test) return;
+
+      const { error } = await supabase
+        .from('submissions')
+        .update({ status: 'recheck_requested' })
+        .eq('id', subId);
+        
+      if (error) throw error;
+
+      // Send notification to teacher
+      await supabase.from('notifications').insert({
+        user_id: test.teacher_id,
+        title: 'Recheck Requested',
+        message: `${profile.full_name || 'A student'} has requested a recheck for the test "${test.title}".`,
+        type: 'recheck'
+      });
+      
+      fetchData().catch(err => console.error('Recheck request fetch rejection:', err));
+      showNotification("Recheck requested successfully!");
+    } catch (err: any) {
+      showNotification("Error requesting recheck: " + err.message, 'error');
+    }
+  };
+
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-50">
+      <div className="flex flex-col items-center gap-4">
+        <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">Synchronizing Portal...</p>
+      </div>
+    </div>
+  );
+
+  if (viewingSubmission) {
+    return <SubmissionViewer 
+      submission={viewingSubmission} 
+      onBack={() => setViewingSubmission(null)} 
+    />;
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+      <header className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-30 px-4 py-4 sm:px-8 flex justify-between items-center shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-primary rounded-xl shadow-lg shadow-primary/20">
+            <Shield className="text-white w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="text-xl font-black text-slate-900 tracking-tight italic leading-none">Examfriendly</h1>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Student Portal</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="hidden sm:block text-right">
+            <p className="text-xs font-black text-slate-900 line-clamp-1 max-w-[150px]">{profile.full_name || user.email}</p>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Candidate</p>
+          </div>
+          <button 
+            onClick={() => supabase.auth.signOut()} 
+            className="flex items-center gap-2 px-4 py-2 border border-red-100 text-red-500 hover:bg-red-50 rounded-xl text-sm font-black transition-all"
+          >
+            <LogOut className="w-4 h-4" /> <span className="hidden sm:inline">Logout</span>
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-8">
+        <div className="mb-10 text-center sm:text-left animate-in fade-in slide-in-from-top-4 duration-700">
+          <h2 className="text-3xl font-black text-slate-900 tracking-tight mb-2">My Examinations</h2>
+          <p className="text-sm font-medium text-slate-500 max-w-2xl">Access your assigned tests, view live session status, and review evaluated papers with teacher feedback.</p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          {tests.map(test => {
+            const sub = getSubmissionForTest(test.id);
+            const isUpcoming = new Date(test.start_time) > new Date();
+            const isPast = new Date(test.end_time) < new Date();
+            const isActive = !isUpcoming && !isPast;
+
+            return (
+              <motion.div 
+                key={test.id}
+                whileHover={{ y: -4 }}
+                className="group bg-white rounded-3xl shadow-xl shadow-slate-200/40 border border-slate-100 flex flex-col overflow-hidden transition-all duration-300 hover:border-primary/20 hover:shadow-2xl hover:shadow-slate-200/60"
+              >
+                <div className="p-6 sm:p-8 flex-1 flex flex-col">
+                  <div className="flex justify-between items-start mb-6">
+                    <div className="p-4 bg-slate-50 rounded-2xl group-hover:bg-primary/5 transition-colors">
+                      <BookOpen className="text-slate-400 group-hover:text-primary w-7 h-7 transition-colors" />
+                    </div>
+                    <div className="flex flex-col items-end gap-1.5">
+                      {isUpcoming && <span className="text-[10px] font-black bg-blue-100 text-blue-600 px-3 py-1 rounded-full uppercase tracking-widest shadow-sm">Upcoming</span>}
+                      {isActive && <span className="text-[10px] font-black bg-green-100 text-green-600 px-3 py-1 rounded-full uppercase tracking-widest shadow-sm animate-pulse">Active Now</span>}
+                      {isPast && <span className="text-[10px] font-black bg-slate-100 text-slate-400 px-3 py-1 rounded-full uppercase tracking-widest">Closed</span>}
+                      {sub && <span className="text-[10px] font-black bg-primary/10 text-primary px-3 py-1 rounded-full uppercase tracking-widest shadow-sm border border-primary/20">Completed</span>}
+                    </div>
+                  </div>
+                  
+                  <div className="flex-1">
+                    <h3 className="font-black text-xl text-slate-900 mb-1 group-hover:text-primary transition-colors leading-tight">{test.title}</h3>
+                    <div className="text-[11px] font-black text-primary mb-4 uppercase tracking-widest flex items-center gap-1.5">
+                      <div className="w-1.5 h-1.5 rounded-full bg-primary/40"></div>
+                      {test.subject}
+                    </div>
+                    <p className="text-slate-500 text-sm font-medium mb-6 line-clamp-2 min-h-[40px] leading-relaxed">
+                      {test.description || `Evaluation session for ${test.subject}. Please ensure all proctoring requirements are met before starting.`}
+                    </p>
+                    
+                    <div className="space-y-3 mb-8 bg-slate-50/50 p-4 rounded-2xl border border-slate-100/50">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Available From</span>
+                        <span className="text-xs font-black text-slate-700">{new Date(test.start_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Ends At</span>
+                        <span className="text-xs font-black text-slate-700">{new Date(test.end_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                      </div>
+                      <div className="flex items-center gap-4 pt-3 mt-1 border-t border-slate-200">
+                        <span className="flex items-center gap-1.5 text-[10px] font-black text-slate-500 uppercase tracking-wider"><Clock className="w-3.5 h-3.5" /> {test.duration_minutes}m</span>
+                        <span className="flex items-center gap-1.5 text-[10px] font-black text-slate-500 uppercase tracking-wider"><Shield className="w-3.5 h-3.5" /> AI Proctoring</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {sub ? (
+                    <div className="space-y-4 pt-4 border-t border-slate-100">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Your Result</span>
+                        <div className={cn(
+                          "px-4 py-1.5 rounded-full text-sm font-black shadow-sm flex items-center gap-2",
+                          sub.is_released === true ? "bg-green-100 text-green-700 border border-green-200" : "bg-orange-100 text-orange-600 border border-orange-200"
+                        )}>
+                          {sub.is_released === true ? (
+                            <>
+                              <CheckCircle className="w-4 h-4" />
+                              {sub.marks_obtained} / {test.total_marks}
+                            </>
+                          ) : (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Awaiting Release
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {sub.is_released === true && (
+                        <>
+                          <div className="p-4 bg-slate-50 rounded-2xl text-[13px] font-medium text-slate-600 italic border border-slate-100 leading-relaxed relative mt-1">
+                            <span className="absolute -top-2 left-4 px-2 bg-white text-[9px] font-black text-slate-400 uppercase tracking-widest border border-slate-100 rounded-full">Educator Notes</span>
+                            "{sub.teacher_remarks || 'Your submission has been evaluated. Review the remarks and corrected copy for details.'}"
+                          </div>
+                          <div className="flex flex-col gap-2 mt-2">
+                            <div className="grid grid-cols-2 gap-2">
+                              <button 
+                                onClick={() => setViewingSubmission(sub)}
+                                className="flex items-center justify-center gap-2 bg-white border border-slate-200 text-slate-700 py-3 rounded-xl text-xs font-black hover:bg-slate-50 transition-all hover:border-slate-300 shadow-sm"
+                              >
+                                <Eye className="w-4 h-4 text-slate-400" /> View Paper
+                              </button>
+                              {sub.corrected_file_id && (
+                                <button 
+                                  onClick={() => window.open(getFileViewUrl(sub.corrected_file_id, true), '_blank')}
+                                  className="flex items-center justify-center gap-2 bg-green-600 text-white py-3 rounded-xl text-xs font-black hover:bg-green-700 transition-all shadow-lg shadow-green-100"
+                                >
+                                  <Download className="w-4 h-4" /> Download
+                                </button>
+                              )}
+                            </div>
+                            {sub.status !== 'recheck_requested' && (
+                              <button 
+                                onClick={() => handleRequestRecheck(sub.id)}
+                                className="w-full text-slate-400 font-bold hover:text-primary transition-colors py-2 text-[11px] uppercase tracking-widest"
+                              >
+                                Request Re-evaluation
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+                      
+                      {sub.status === 'recheck_requested' && (
+                        <div className="py-3 bg-orange-50 text-orange-600 text-[10px] font-black rounded-xl uppercase tracking-widest border border-orange-100 text-center flex items-center justify-center gap-2">
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Re-evaluation in Progress
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <button 
+                      disabled={!isActive || test.is_paused}
+                      onClick={() => onEnterExam(test)}
+                      className={cn(
+                        "w-full font-black py-4 rounded-2xl transition-all shadow-xl group/btn overflow-hidden relative group",
+                        isActive && !test.is_paused 
+                          ? "bg-primary text-white hover:bg-primary/90 shadow-primary/20 hover:scale-[1.02] active:scale-[0.98]" 
+                          : "bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200 shadow-none"
+                      )}
+                    >
+                      <span className="relative z-10 flex items-center justify-center gap-2">
+                        {test.is_paused ? <><Lock className="w-4 h-4" /> Exam Paused</> : isActive ? <><Send className="w-4 h-4 transition-transform group-hover:translate-x-1" /> Start Exam</> : isUpcoming ? <><Clock className="w-4 h-4" /> Starts Soon</> : 'Session Closed'}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            );
+          })}
+          {tests.length === 0 && (
+            <div className="col-span-full py-24 text-center bg-white rounded-[32px] border-2 border-dashed border-slate-200">
+              <div className="w-20 h-20 bg-slate-50 rounded-3xl flex items-center justify-center mx-auto mb-6">
+                <BookOpen className="w-10 h-10 text-slate-200" />
+              </div>
+              <h3 className="text-xl font-black text-slate-900 mb-2">No Exams Found</h3>
+              <p className="text-slate-500 font-medium max-w-sm mx-auto px-4">You haven't been assigned to any examinations yet. Please contact your administrator if this is an error.</p>
+            </div>
+          )}
+        </div>
+      </main>
+    </div>
+  );
+};
+
+// --- Main App ---
+
+export default function App() {
+  const [user, setUser] = useState<any>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [activeTest, setActiveTest] = useState<Test | null>(null);
+  const [previewRole, setPreviewRole] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ message: string, onConfirm: () => void } | null>(null);
+
+  const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 3000);
+  };
+
+  useEffect(() => {
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason?.message || String(event.reason || '');
+      // Ignore Vite HMR WebSocket errors as they are expected in this environment
+      if (reason.includes('WebSocket closed without opened')) {
+        return;
+      }
+      
+      console.error('Unhandled Rejection:', event.reason);
+      if (reason === 'Failed to fetch') {
+        showNotification("Network error: Failed to fetch. Please check your internet connection or API configuration.", 'error');
+      }
+    };
+
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+  }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setLoading(false);
+      return;
+    }
+
+    // Test Supabase connection
+    const testConnection = async () => {
+      try {
+        const { error } = await supabase.from('profiles').select('id').limit(1);
+        if (error && error.message === 'Failed to fetch') {
+          showNotification("Supabase connection failed: Failed to fetch. Please check your Supabase URL and Anon Key.", 'error');
+        }
+      } catch (err: any) {
+        if (err.message === 'Failed to fetch') {
+          showNotification("Supabase connection failed: Failed to fetch. Please check your Supabase URL and Anon Key.", 'error');
+        }
+      }
+    };
+    testConnection();
+    
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setUser(session.user);
+        fetchProfile(session.user.id).catch(err => console.error('Initial profile fetch rejection:', err));
+      } else {
+        setLoading(false);
+      }
+    }).catch(err => {
+      console.error("Error getting session:", err);
+      setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProfile(session.user.id).catch(err => console.error('Auth change profile fetch rejection:', err));
+        // 12-hour session auto-logout
+        const loginTime = new Date().getTime();
+        localStorage.setItem('login_time', loginTime.toString());
+      } else {
+        setProfile(null);
+        localStorage.removeItem('login_time');
+      }
+    });
+
+    // Check session duration every minute
+    const sessionCheck = setInterval(() => {
+      const loginTime = localStorage.getItem('login_time');
+      if (loginTime) {
+        const elapsed = new Date().getTime() - parseInt(loginTime);
+        if (elapsed > 12 * 60 * 60 * 1000) {
+          supabase.auth.signOut();
+          alert("Session expired (12 hours). Please login again.");
+        }
+      }
+    }, 60000);
+
+    return () => {
+      subscription.unsubscribe();
+      clearInterval(sessionCheck);
+    };
+  }, []);
+
+  const fetchProfile = async (id: string) => {
+    try {
+      const { data, error } = await supabase.from('profiles').select('*').eq('id', id).single();
+      if (error) {
+        if (error.message === 'Failed to fetch' || error.code === 'PGRST116' || true) {
+          console.log("Direct profile fetch failed or not found, trying proxy fallback...");
+          const proxyResponse = await fetch(`/api/profiles/${id}`);
+          if (proxyResponse.ok) {
+            const proxyData = await proxyResponse.json();
+            setProfile(proxyData || null);
+            return;
+          } else if (error.code !== 'PGRST116') {
+            console.error("Error fetching profile via proxy:", await proxyResponse.text());
+          }
+        }
+        
+        if (error.code !== 'PGRST116') {
+          console.error("Error fetching profile:", error);
+          if (error.message === 'Failed to fetch') {
+            setError("Connection failed. Please check your Supabase configuration and network.");
+          }
+        }
+      }
+      setProfile(data || null);
+    } catch (err: any) {
+      console.error("Unexpected error fetching profile, trying proxy fallback:", err);
+      try {
+        const proxyResponse = await fetch(`/api/profiles/${id}`);
+        if (proxyResponse.ok) {
+          const proxyData = await proxyResponse.json();
+          setProfile(proxyData || null);
+          return;
+        }
+      } catch (proxyErr) {
+        console.error("Proxy fallback also failed:", proxyErr);
+      }
+
+      if (err.message === 'Failed to fetch') {
+        setError("Connection failed. Please check your Supabase configuration and network.");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-white">
+      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
+    </div>
+  );
+
+  if (!isSupabaseConfigured) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 border border-red-100 text-center">
+          <AlertTriangle className="w-16 h-16 text-red-500 mx-auto mb-4" />
+          <h2 className="text-2xl font-bold mb-2 text-gray-900">Configuration Missing</h2>
+          <p className="text-gray-500 mb-6">
+            Supabase environment variables are not set. Please add them to the <b>Secrets</b> panel in the AI Studio settings.
+          </p>
+          <div className="bg-gray-50 p-4 rounded-lg text-left text-xs font-mono space-y-2">
+            <p>VITE_SUPABASE_URL</p>
+            <p>VITE_SUPABASE_ANON_KEY</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) return <Login onLogin={(u) => setUser(u)} />;
+
+  const effectiveRole = previewRole || profile?.role;
+
+  // Profile Setup Mode (if logged in but no profile exists)
+  if (!profile && !loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 border border-gray-100 text-center">
+          <User className="w-16 h-16 text-primary mx-auto mb-4" />
+          <h2 className="text-2xl font-bold mb-2">Complete Your Profile</h2>
+          <p className="text-gray-500 mb-6">We couldn't find a profile for your account. Please select your role to continue.</p>
+          
+          <div className="space-y-4">
+            <button 
+              onClick={async () => {
+                try {
+                  console.log('Setting role to admin for user:', user.id);
+                  const { error } = await supabase.from('profiles').insert({
+                    id: user.id,
+                    email: user.email,
+                    role: 'admin'
+                  });
+                  if (!error) {
+                    console.log('Admin profile created successfully');
+                    fetchProfile(user.id);
+                  } else {
+                    console.error('Admin profile creation error:', error);
+                    alert('Error creating profile: ' + error.message);
+                  }
+                } catch (err: any) {
+                  alert('Network error creating profile: ' + err.message);
+                }
+              }}
+              className="w-full bg-gray-900 text-white font-bold py-3 rounded-lg hover:bg-gray-800 transition"
+            >
+              I am an Admin
+            </button>
+            <button 
+              onClick={async () => {
+                try {
+                  console.log('Setting role to teacher for user:', user.id);
+                  const { error } = await supabase.from('profiles').insert({
+                    id: user.id,
+                    email: user.email,
+                    role: 'teacher'
+                  });
+                  if (!error) {
+                    console.log('Teacher profile created successfully');
+                    fetchProfile(user.id);
+                  } else {
+                    console.error('Teacher profile creation error:', error);
+                    alert('Error creating profile: ' + error.message);
+                  }
+                } catch (err: any) {
+                  alert('Network error creating profile: ' + err.message);
+                }
+              }}
+              className="w-full border-2 border-primary text-primary font-bold py-3 rounded-lg hover:bg-primary/5 transition"
+            >
+              I am a Teacher
+            </button>
+            <button 
+              onClick={async () => {
+                try {
+                  console.log('Setting role to student for user:', user.id);
+                  const { error } = await supabase.from('profiles').insert({
+                    id: user.id,
+                    email: user.email,
+                    role: 'student'
+                  });
+                  if (!error) {
+                    console.log('Student profile created successfully');
+                    fetchProfile(user.id);
+                  } else {
+                    console.error('Student profile creation error:', error);
+                    alert('Error creating profile: ' + error.message);
+                  }
+                } catch (err: any) {
+                  alert('Network error creating profile: ' + err.message);
+                }
+              }}
+              className="w-full bg-primary text-white font-bold py-3 rounded-lg hover:bg-primary/90 transition"
+            >
+              I am a Student
+            </button>
+            <button onClick={() => {
+              console.log('Signing out from profile setup');
+              supabase.auth.signOut();
+            }} className="text-sm text-gray-400 hover:underline mt-4 block w-full">
+              Sign out and try again
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col relative">
+      {/* Main Content */}
+      <div className="flex-1 overflow-hidden">
+        {effectiveRole === 'student' ? (
+          activeTest ? (
+            <StudentExam test={activeTest} user={user} onFinish={() => setActiveTest(null)} showNotification={showNotification} />
+          ) : (
+            <>
+              {profile?.role === 'admin' && (
+              <div className="fixed bottom-4 right-4 z-[100] flex gap-2">
+                <button 
+                  onClick={() => setPreviewRole(null)}
+                  className={cn("px-3 py-1 rounded-full text-xs font-bold shadow-lg transition", !previewRole ? "bg-primary text-white" : "bg-white text-gray-600")}
+                >
+                  Admin View
+                </button>
+                <button 
+                  onClick={() => setPreviewRole('teacher')}
+                  className={cn("px-3 py-1 rounded-full text-xs font-bold shadow-lg transition", previewRole === 'teacher' ? "bg-primary text-white" : "bg-white text-gray-600")}
+                >
+                  Teacher View
+                </button>
+                <button 
+                  onClick={() => setPreviewRole('student')}
+                  className={cn("px-3 py-1 rounded-full text-xs font-bold shadow-lg transition", previewRole === 'student' ? "bg-primary text-white" : "bg-white text-gray-600")}
+                >
+                  Student View
+                </button>
+              </div>
+            )}
+            <StudentDashboard 
+              user={user} 
+              profile={profile!} 
+              onEnterExam={(test) => setActiveTest(test)} 
+              showNotification={showNotification}
+            />
+          </>
+        )
+      ) : (effectiveRole === 'teacher' || effectiveRole === 'admin') ? (
+          <>
+            {profile?.role === 'admin' && (
+              <div className="fixed bottom-4 right-4 z-[100] flex gap-2">
+                <button 
+                  onClick={() => setPreviewRole(null)}
+                  className={cn("px-3 py-1 rounded-full text-xs font-bold shadow-lg transition", !previewRole ? "bg-primary text-white" : "bg-white text-gray-600")}
+                >
+                  Admin View
+                </button>
+                <button 
+                  onClick={() => setPreviewRole('teacher')}
+                  className={cn("px-3 py-1 rounded-full text-xs font-bold shadow-lg transition", previewRole === 'teacher' ? "bg-primary text-white" : "bg-white text-gray-600")}
+                >
+                  Teacher View
+                </button>
+                <button 
+                  onClick={() => setPreviewRole('student')}
+                  className={cn("px-3 py-1 rounded-full text-xs font-bold shadow-lg transition", previewRole === 'student' ? "bg-primary text-white" : "bg-white text-gray-600")}
+                >
+                  Student View
+                </button>
+              </div>
+            )}
+            <TeacherDashboard user={user} profile={profile} showNotification={showNotification} setConfirmAction={setConfirmAction} />
+          </>
+        ) : (
+          <div className="min-h-screen flex items-center justify-center">
+            <div className="text-center">
+              <AlertTriangle className="w-12 h-12 text-secondary mx-auto mb-4" />
+              <h2 className="text-xl font-bold">Role not assigned</h2>
+              <p className="text-gray-500">Please contact your administrator.</p>
+              <button onClick={() => supabase.auth.signOut()} className="mt-4 text-primary font-bold">Logout</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Custom Notification */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div 
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className={cn(
+              "fixed bottom-8 right-8 z-[100] px-6 py-3 rounded-xl shadow-2xl font-bold text-sm flex items-center gap-3",
+              notification.type === 'success' ? "bg-green-600 text-white" : "bg-red-600 text-white"
+            )}
+          >
+            {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
+            {notification.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Custom Confirm Modal */}
+      <AnimatePresence>
+        {confirmAction && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full"
+            >
+              <div className="w-16 h-16 rounded-full bg-orange-100 flex items-center justify-center mb-6 mx-auto">
+                <AlertTriangle className="w-8 h-8 text-orange-600" />
+              </div>
+              <h3 className="text-xl font-bold text-center mb-2">Confirm Action</h3>
+              <p className="text-gray-500 text-center mb-8">{confirmAction.message}</p>
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setConfirmAction(null)}
+                  className="flex-1 py-3 rounded-xl font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 transition"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={confirmAction.onConfirm}
+                  className="flex-1 py-3 rounded-xl font-bold text-white bg-primary hover:bg-primary/90 shadow-lg shadow-primary/20 transition"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
